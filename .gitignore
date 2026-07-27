@@ -1,0 +1,41 @@
+# Byte-compiled / packaging
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+wheels/
+bilby_xG/_version.py
+
+# Testing / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+
+# Claude Code
+.claude/
+
+# Editors / IDEs
+.vscode/
+.idea/
+*.swp
+*~
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# bilby outputs
+outdir/
+*.npz
+.distance_marginalization_lookup*.npz
+
+# OS
+.DS_Store

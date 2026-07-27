@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bilby_xG"
+version = "0.1.0"
+description = "Gravitational-wave inference with next-generation detectors (Cosmic Explorer, Einstein Telescope), built on bilby"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [
+    { name = "Pratyusava Baral", email = "pbaral@uwm.edu" },
+    { name = "Soichiro Morisaki" },
+    { name = "Ish Gupta" },
+]
+keywords = [
+    "gravitational waves",
+    "bayesian inference",
+    "bilby",
+    "cosmic explorer",
+    "einstein telescope",
+]
+classifiers = [
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: MIT License",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Astronomy",
+]
+dependencies = [
+    "bilby>=2.3",
+    "bilby.cython>=0.4.0",
+    "numpy",
+    "scipy",
+]
+
+[project.optional-dependencies]
+test = ["pytest", "pytest-cov"]
+
+[project.urls]
+Homepage = "https://git.ligo.org/pratyusava.baral/bilby_xG"
+Source = "https://git.ligo.org/pratyusava.baral/bilby_xG"
+
+[tool.setuptools.packages.find]
+include = ["bilby_xG*"]
+
+[tool.setuptools.package-data]
+bilby_xG = [
+    "data/detectors/*",
+    "data/noise_curves/*.txt",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

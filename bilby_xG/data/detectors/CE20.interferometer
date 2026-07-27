@@ -1,0 +1,15 @@
+# The proposed 20km Cosmic Explorer located at the site of LIGO Livingston.
+# Displacement ASDs divided by the detector length. Please include detector size effects for accurate high frequency responses.
+# https://dcc.cosmicexplorer.org/CE-T2000017/public
+name = 'CE20'
+power_spectral_density = PowerSpectralDensity(asd_file='ce20_asd.txt')
+minimum_frequency = 5
+maximum_frequency = 2048
+length = 20
+latitude = 29 + 0 / 60 + 0 / 3600
+longitude = -(93 + 59. / 60 + 60 / 3600)
+elevation = -6.574
+xarm_azimuth = 200
+yarm_azimuth = 290
+xarm_tilt = -3.121e-4
+yarm_tilt = -6.107e-4

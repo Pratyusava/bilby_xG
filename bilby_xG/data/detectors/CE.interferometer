@@ -1,0 +1,15 @@
+# The proposed 40km Cosmic Explorer located at the site of LIGO Hanford.
+# Displacement ASDs divided by the detector length. Please include detector size effects for accurate high frequency responses.
+# https://dcc.cosmicexplorer.org/CE-T2000017/public
+name = 'CE'
+power_spectral_density = PowerSpectralDensity(asd_file='CE_asd.txt')
+minimum_frequency = 5
+maximum_frequency = 2048
+length = 40
+latitude = 45 + 59. / 60 + 60 / 3600
+longitude = -(124 + 59. / 60 + 60 / 3600)
+elevation = 142.554
+xarm_azimuth = 260
+yarm_azimuth = 350
+xarm_tilt = -6.195e-4
+yarm_tilt = 1.25e-5
