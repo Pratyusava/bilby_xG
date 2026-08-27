@@ -111,9 +111,25 @@ from bilby_xG.propagation import SpeedOfGravity, ModifiedDispersion
 triangle at the Euregio Meuse–Rhine site (`ET-EMR`) and the 15 km L-shaped
 detectors in Sardinia (`ET_1L_IT`) and Lusatia (`ET_1L_DE`) — together with
 their amplitude/power spectral densities (`CE`/`CE20` ASDs; the ET
-high-frequency PSDs `ET_10_HF_psd_pub.txt` / `ET_15_HF_psd_pub.txt` and the
-matching high-and-low-frequency PSDs `ET_10_HFLF_psd.txt` /
-`ET_15_HFLF_psd.txt`), resolved automatically by `bilby_xG.networks`.
+cryogenic high-and-low-frequency PSDs `ET_10_HFLF_psd.txt` /
+`ET_15_HFLF_psd.txt` and the published high-frequency-only PSDs
+`ET_10_HF_psd_pub.txt` / `ET_15_HF_psd_pub.txt`), resolved automatically by
+`bilby_xG.networks`.
+
+The `ET-EMR`, `ET_1L_IT` and `ET_1L_DE` definitions use the **HFLF**
+sensitivity with `minimum_frequency = 3` Hz. To run with the
+high-frequency-only curve instead, swap the PSD and raise the low-frequency
+cutoff after loading the interferometer:
+
+```python
+from bilby_xG.networks import InterferometerList, PowerSpectralDensity
+
+ifos = InterferometerList(["ET_1L_IT", "ET_1L_DE"])
+for ifo in ifos:
+    ifo.power_spectral_density = PowerSpectralDensity(
+        psd_file=f"ET_{int(ifo.length)}_HF_psd_pub.txt")
+    ifo.minimum_frequency = 6  # 2 Hz for the 10 km ET-EMR triangle
+```
 
 > **Note:** `bilby_xG` ships an updated 40 km `CE` definition that **takes
 > precedence** over bilby's built-in `CE` when using `bilby_xG.networks`.

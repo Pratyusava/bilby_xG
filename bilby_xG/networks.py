@@ -22,17 +22,18 @@ noise curves.
 The Einstein Telescope definitions mirror the current design study: the
 10 km triangle at the Euregio Meuse-Rhine site (``ET-EMR``) and the two
 15 km L-shaped detectors in Sardinia (``ET_1L_IT``) and Lusatia
-(``ET_1L_DE``), each referencing the published high-frequency PSDs
-(``ET_10_HF_psd_pub.txt``, ``ET_15_HF_psd_pub.txt``).
+(``ET_1L_DE``). Each references the cryogenic high-and-low-frequency (HFLF)
+baseline PSD (``ET_10_HFLF_psd.txt`` or ``ET_15_HFLF_psd.txt``) with
+``minimum_frequency = 3``.
 
-The matching high-and-low-frequency PSDs (10 km and 15 km cryogenic HFLF
-baseline) are also shipped, as ``ET_10_HFLF_psd.txt`` and
-``ET_15_HFLF_psd.txt``. Swap them in and lower ``minimum_frequency`` to
-run down to a few Hz, e.g.::
+The published high-frequency-only PSDs (``ET_10_HF_psd_pub.txt``,
+``ET_15_HF_psd_pub.txt``) are also shipped. To use the HF-only curve, swap
+it in and raise ``minimum_frequency`` (6 Hz for the 15 km detectors, 2 Hz
+for the 10 km triangle), e.g.::
 
     ifo.power_spectral_density = PowerSpectralDensity(
-        psd_file=f"ET_{int(ifo.length)}_HFLF_psd.txt")
-    ifo.minimum_frequency = 3
+        psd_file=f"ET_{int(ifo.length)}_HF_psd_pub.txt")
+    ifo.minimum_frequency = 6
 """
 import os
 

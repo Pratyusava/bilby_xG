@@ -1,9 +1,9 @@
 # The proposed 1L Einstein Telescope located in Sardinia (Italy).
 # 
 name = 'ET_1L_IT'
-power_spectral_density = PowerSpectralDensity(psd_file='ET_15_HF_psd_pub.txt')
+power_spectral_density = PowerSpectralDensity(psd_file='ET_15_HFLF_psd.txt')
 length = 15
-minimum_frequency = 6
+minimum_frequency = 3
 maximum_frequency = 4096
 latitude = 40 + 31. / 60
 longitude = 9 + 25. / 60

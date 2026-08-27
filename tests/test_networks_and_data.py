@@ -84,7 +84,9 @@ def test_einstein_telescope_l_shaped_detectors_resolve_by_name():
         assert ifo.name == name
         assert ifo.length == 15
         assert np.isclose(ifo.latitude, lat)
-        # PSD (ET_15_HF_psd_pub.txt) resolves from bilby_xG's noise curves.
+        # Ships with the HFLF baseline sensitivity down to 3 Hz.
+        assert ifo.minimum_frequency == 3
+        assert "HFLF" in ifo.power_spectral_density.psd_file
         psd = ifo.power_spectral_density.psd_array
         assert np.all(np.isfinite(psd[psd > 0]))
 
@@ -105,6 +107,8 @@ def test_einstein_telescope_triangle_resolves_by_name():
     assert [ifo.name for ifo in et] == ["ET-EMR1", "ET-EMR2", "ET-EMR3"]
     assert all(isinstance(ifo, Interferometer) for ifo in et)
     assert all(ifo.length == 10 for ifo in et)
+    assert all(ifo.minimum_frequency == 3 for ifo in et)
+    assert all("HFLF" in ifo.power_spectral_density.psd_file for ifo in et)
 
 
 def test_einstein_telescope_network():

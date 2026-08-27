@@ -2,9 +2,9 @@
 # 
 # 
 name = 'ET-EMR'
-power_spectral_density = PowerSpectralDensity(psd_file='ET_10_HF_psd_pub.txt')
+power_spectral_density = PowerSpectralDensity(psd_file='ET_10_HFLF_psd.txt')
 length = 10
-minimum_frequency = 2
+minimum_frequency = 3
 maximum_frequency = 4096
 latitude = 50 + 43. / 60 + 23. / 3600
 longitude = 5 + 55. / 60 + 14. / 3600
