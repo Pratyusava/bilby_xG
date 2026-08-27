@@ -45,7 +45,7 @@ The package mirrors bilby's module layout:
 |---|---|
 | `bilby_xG.geometry` | `InterferometerGeometry` with the per-arm detector tensors `xx`/`yy` |
 | `bilby_xG.interferometer` | `Interferometer` with the frequency-dependent, finite-size, Earth-rotation-aware response and a `vG`-aware `time_delay_from_geocenter` |
-| `bilby_xG.networks` | `get_empty_interferometer`, `InterferometerList`, `TriangularInterferometer`, `PowerSpectralDensity` resolving the shipped `CE`/`CE20` definitions and noise curves |
+| `bilby_xG.networks` | `get_empty_interferometer`, `InterferometerList`, `TriangularInterferometer`, `PowerSpectralDensity` resolving the shipped `CE`/`CE20`/`ET` definitions and noise curves |
 | `bilby_xG.likelihood` | `GravitationalWaveTransientNextGeneration` and its multi-banded and relative-binning variants |
 | `bilby_xG.source` | CBC source models, including the individual-mode (higher-order-mode) models |
 | `bilby_xG.propagation` | `Propagation` (GR), `SpeedOfGravity`, `ModifiedDispersion`, `build_propagation` |
@@ -106,9 +106,12 @@ from bilby_xG.propagation import SpeedOfGravity, ModifiedDispersion
 
 ## Shipped data
 
-`bilby_xG` ships next-generation detector definitions (`CE`, `CE20`) and the
-corresponding Cosmic Explorer amplitude spectral densities, resolved
-automatically by `bilby_xG.networks`.
+`bilby_xG` ships next-generation detector definitions — Cosmic Explorer
+(`CE`, `CE20`) and the latest Einstein Telescope configurations: the 10 km
+triangle at the Euregio Meuse–Rhine site (`ET-EMR`) and the 15 km L-shaped
+detectors in Sardinia (`ET_1L_IT`) and Lusatia (`ET_1L_DE`) — together with
+their amplitude/power spectral densities (`CE`/`CE20` ASDs, `ET_10_HF_psd_pub.txt`,
+`ET_15_HF_psd_pub.txt`), resolved automatically by `bilby_xG.networks`.
 
 > **Note:** `bilby_xG` ships an updated 40 km `CE` definition that **takes
 > precedence** over bilby's built-in `CE` when using `bilby_xG.networks`.

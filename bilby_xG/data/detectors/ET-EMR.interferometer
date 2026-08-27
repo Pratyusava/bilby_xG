@@ -1,0 +1,14 @@
+# The proposed Einstein Telescope located in the EMR site.
+# 
+# 
+name = 'ET-EMR'
+power_spectral_density = PowerSpectralDensity(psd_file='ET_10_HF_psd_pub.txt')
+length = 10
+minimum_frequency = 2
+maximum_frequency = 4096
+latitude = 50 + 43. / 60 + 23. / 3600
+longitude = 5 + 55. / 60 + 14. / 3600
+elevation = 0
+xarm_azimuth = 250.56740000000002
+yarm_azimuth = 310.5674
+shape = 'Triangle'

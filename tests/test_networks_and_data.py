@@ -77,6 +77,33 @@ def test_shipped_psd_resolves_by_bare_name():
     assert np.all(np.isfinite(psd.asd_array[psd.asd_array > 0]))
 
 
+def test_einstein_telescope_l_shaped_detectors_resolve_by_name():
+    for name, lat in [("ET_1L_IT", 40 + 31.0 / 60), ("ET_1L_DE", 51.275)]:
+        ifo = get_empty_interferometer(name)
+        assert isinstance(ifo, Interferometer)
+        assert ifo.name == name
+        assert ifo.length == 15
+        assert np.isclose(ifo.latitude, lat)
+        # PSD (ET_15_HF_psd_pub.txt) resolves from bilby_xG's noise curves.
+        psd = ifo.power_spectral_density.psd_array
+        assert np.all(np.isfinite(psd[psd > 0]))
+
+
+def test_einstein_telescope_triangle_resolves_by_name():
+    et = get_empty_interferometer("ET-EMR")
+    assert isinstance(et, bilby.gw.detector.TriangularInterferometer)
+    assert len(et) == 3
+    assert [ifo.name for ifo in et] == ["ET-EMR1", "ET-EMR2", "ET-EMR3"]
+    assert all(isinstance(ifo, Interferometer) for ifo in et)
+    assert all(ifo.length == 10 for ifo in et)
+
+
+def test_einstein_telescope_network():
+    ifos = InterferometerList(["ET_1L_IT", "ET_1L_DE"])
+    assert [ifo.name for ifo in ifos] == ["ET_1L_IT", "ET_1L_DE"]
+    assert all(isinstance(ifo, Interferometer) for ifo in ifos)
+
+
 def test_log10_luminosity_distance_conversion():
     from bilby_xG.conversion import convert_to_lal_binary_black_hole_parameters
     converted, _ = convert_to_lal_binary_black_hole_parameters(
