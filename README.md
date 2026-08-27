@@ -128,7 +128,7 @@ ifos = InterferometerList(["ET_1L_IT", "ET_1L_DE"])
 for ifo in ifos:
     ifo.power_spectral_density = PowerSpectralDensity(
         psd_file=f"ET_{int(ifo.length)}_HF_psd_pub.txt")
-    ifo.minimum_frequency = 6  # 2 Hz for the 10 km ET-EMR triangle
+    ifo.minimum_frequency = 6
 ```
 
 > **Note:** `bilby_xG` ships an updated 40 km `CE` definition that **takes
