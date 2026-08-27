@@ -116,9 +116,11 @@ cryogenic high-and-low-frequency PSDs `ET_10_HFLF_psd.txt` /
 `ET_10_HF_psd_pub.txt` / `ET_15_HF_psd_pub.txt`), resolved automatically by
 `bilby_xG.networks`.
 
-The `ET-EMR`, `ET_1L_IT` and `ET_1L_DE` definitions use the **HFLF**
-sensitivity with `minimum_frequency = 3` Hz. To run with the
-high-frequency-only curve instead, swap the PSD and raise the low-frequency
+By default, the `ET-EMR`, `ET_1L_IT` and `ET_1L_DE` definitions use the **HFLF**
+sensitivity with `minimum_frequency = 3` Hz. 
+To run with the high-frequency-only curve instead, 
+which is likely representative of the first few years of detector operation,
+swap the PSD and raise the low-frequency
 cutoff after loading the interferometer:
 
 ```python
