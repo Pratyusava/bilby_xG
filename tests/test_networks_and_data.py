@@ -89,6 +89,15 @@ def test_einstein_telescope_l_shaped_detectors_resolve_by_name():
         assert np.all(np.isfinite(psd[psd > 0]))
 
 
+def test_einstein_telescope_hflf_psd_resolves_by_bare_name():
+    for length in (10, 15):
+        psd = PowerSpectralDensity(psd_file=f"ET_{length}_HFLF_psd.txt")
+        assert psd.psd_array is not None
+        assert np.all(np.isfinite(psd.psd_array[psd.psd_array > 0]))
+        # HFLF curve extends below the high-frequency f_min.
+        assert psd.frequency_array.min() <= 2
+
+
 def test_einstein_telescope_triangle_resolves_by_name():
     et = get_empty_interferometer("ET-EMR")
     assert isinstance(et, bilby.gw.detector.TriangularInterferometer)

@@ -110,8 +110,10 @@ from bilby_xG.propagation import SpeedOfGravity, ModifiedDispersion
 (`CE`, `CE20`) and the latest Einstein Telescope configurations: the 10 km
 triangle at the Euregio Meuse–Rhine site (`ET-EMR`) and the 15 km L-shaped
 detectors in Sardinia (`ET_1L_IT`) and Lusatia (`ET_1L_DE`) — together with
-their amplitude/power spectral densities (`CE`/`CE20` ASDs, `ET_10_HF_psd_pub.txt`,
-`ET_15_HF_psd_pub.txt`), resolved automatically by `bilby_xG.networks`.
+their amplitude/power spectral densities (`CE`/`CE20` ASDs; the ET
+high-frequency PSDs `ET_10_HF_psd_pub.txt` / `ET_15_HF_psd_pub.txt` and the
+matching high-and-low-frequency PSDs `ET_10_HFLF_psd.txt` /
+`ET_15_HFLF_psd.txt`), resolved automatically by `bilby_xG.networks`.
 
 > **Note:** `bilby_xG` ships an updated 40 km `CE` definition that **takes
 > precedence** over bilby's built-in `CE` when using `bilby_xG.networks`.
