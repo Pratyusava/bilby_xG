@@ -1,0 +1,12 @@
+# The proposed 1L Einstein Telescope located in Lusatia (Germany).
+# 
+name = 'ET_1L_DE'
+power_spectral_density = PowerSpectralDensity(psd_file='ET_15_HFLF_psd.txt')
+length = 15
+minimum_frequency = 3
+maximum_frequency = 4096
+latitude = 51.275
+longitude = 14.100
+elevation = 0
+xarm_azimuth = 45
+yarm_azimuth = 135

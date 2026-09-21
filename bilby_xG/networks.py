@@ -8,14 +8,20 @@ response can be evaluated with the frequency-dependent, finite-size,
 Earth-rotation-aware method needed for next-generation detectors.
 
 Detector definitions shipped with bilby_xG (the next-generation ``CE`` and
-``CE20``) take precedence; any other name falls back to the definitions
-shipped with bilby, loaded as bilby_xG interferometers. Amplitude spectral
-densities referenced by the detector files are resolved first from
-bilby_xG's ``data/noise_curves``, then from bilby's built-in noise curves.
+``CE20``; the latest Einstein Telescope configurations ``ET-EMR``,
+``ET_1L_IT`` and ``ET_1L_DE``) take precedence; any other name falls back
+to the definitions shipped with bilby, loaded as bilby_xG interferometers.
+Amplitude spectral densities referenced by the detector files are resolved
+first from bilby_xG's ``data/noise_curves``, then from bilby's built-in
+noise curves.
 
 .. note:: bilby_xG ships an updated 40 km ``CE`` definition that takes
    precedence over bilby's built-in ``CE``. Use a different name if you need
    the original.
+
+The Einstein Telescope definitions (``ET-EMR``, ``ET_1L_IT``, ``ET_1L_DE``)
+default to the cryogenic HFLF baseline sensitivity; the high-frequency-only
+PSDs are also shipped. See the README for how to switch between them.
 """
 import os
 
@@ -129,9 +135,10 @@ def load_interferometer(filename):
 def get_empty_interferometer(name):
     """Get a bilby_xG interferometer with standard parameters by name.
 
-    Detector definitions shipped with bilby_xG (``CE``, ``CE20``) take
-    precedence; any other name (e.g. ``H1``, ``L1``, ``V1``, ``ET``) is loaded
-    from bilby's built-in definitions as a bilby_xG interferometer.
+    Detector definitions shipped with bilby_xG (``CE``, ``CE20``, ``ET-EMR``,
+    ``ET_1L_IT``, ``ET_1L_DE``) take precedence; any other name (e.g. ``H1``,
+    ``L1``, ``V1``, ``ET``) is loaded from bilby's built-in definitions as a
+    bilby_xG interferometer.
 
     Parameters
     ==========
