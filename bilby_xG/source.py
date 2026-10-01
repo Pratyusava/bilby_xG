@@ -1835,6 +1835,10 @@ MLGW_BNS_PRECESSION_STEPS = 2048
 
 _MLGW_BNS_PRECESSING = {}
 _MLGW_BNS_PRECESSING_LAST = {}
+#: precession angles of the last few binaries (the fiducial, the injection,
+#: bin-selection test points), keyed by their parameters
+_MLGW_BNS_ANGLES = {}
+_MLGW_BNS_ANGLES_SIZE = 8
 
 
 def _check_mlgw_bns_modes(mode_array):
@@ -1858,6 +1862,17 @@ def mlgw_bns_precessing_components(mode_array=None, n_steps=MLGW_BNS_PRECESSION_
     if key not in _MLGW_BNS_PRECESSING:
         _MLGW_BNS_PRECESSING[key] = jax.jit(
             precessing_mode_components(_mlgw_bns_model(), modes, int(n_steps)))
+    return _MLGW_BNS_PRECESSING[key]
+
+
+def _mlgw_bns_precession_angles(n_steps):
+    """The jitted :func:`mlgw_bns.batched_precession.precession_angles`."""
+    import jax
+    from mlgw_bns.batched_precession import precession_angles
+
+    key = ("angles", int(n_steps))
+    if key not in _MLGW_BNS_PRECESSING:
+        _MLGW_BNS_PRECESSING[key] = jax.jit(precession_angles(_mlgw_bns_model(), int(n_steps)))
     return _MLGW_BNS_PRECESSING[key]
 
 
@@ -1950,10 +1965,18 @@ def mlgw_bns_precessing_individual_modes(frequency_array, M, q, a_1, a_2, tilt_1
             reference_frequency, phase)
         intrinsic = np.array([[q, LambdaAl2, LambdaBl2, *orientation.chi_1,
                                *orientation.chi_2]])
+        # integrated once per binary, however many pieces and modes
+        angles_key = cache_key[0]
+        if angles_key not in _MLGW_BNS_ANGLES:
+            if len(_MLGW_BNS_ANGLES) >= _MLGW_BNS_ANGLES_SIZE:
+                _MLGW_BNS_ANGLES.pop(next(iter(_MLGW_BNS_ANGLES)))
+            _MLGW_BNS_ANGLES[angles_key] = _mlgw_bns_precession_angles(n_steps)(
+                intrinsic, M, reference_frequency, start)
         components = _evaluate_precessing(
             mlgw_bns_precessing_components(MLGW_BNS_MODES, n_steps), freqs[in_band], start,
             intrinsic, M, distance, orientation.inclination, orientation.azimuth,
-            orientation.reference_phase, reference_frequency)
+            orientation.reference_phase, reference_frequency,
+            angles=_MLGW_BNS_ANGLES[angles_key])
         if not all(np.all(np.isfinite(x)) for x in components):
             raise ValueError("Parameters outside the range of the mlgw_bns surrogate")
         _MLGW_BNS_PRECESSING_LAST.update(key=cache_key, components=components)
@@ -1977,11 +2000,13 @@ def mlgw_bns_precessing_individual_modes(frequency_array, M, q, a_1, a_2, tilt_1
     return polarizations
 
 
-def _evaluate_precessing(function, frequencies, start, intrinsic, *arguments):
+def _evaluate_precessing(function, frequencies, start, intrinsic, *arguments, angles=None):
     """``function`` (a :func:`mlgw_bns_precessing_components`) for one binary
-    at ``frequencies``, each piece with ``start`` prepended (the start of the
-    angle integration) and padded to one of :data:`MLGW_BNS_PRECESSING_LENGTHS`.
-    Returns ``(coprecessing, c_plus, c_cross)``, of shape ``(n_modes, k)``."""
+    at ``frequencies``, in pieces padded to one of
+    :data:`MLGW_BNS_PRECESSING_LENGTHS`, with the precession ``angles``
+    integrated from ``start`` (by ``function`` from ``start`` prepended to
+    each piece if not given). Returns ``(coprecessing, c_plus, c_cross)``,
+    of shape ``(n_modes, k)``."""
     longest = MLGW_BNS_PRECESSING_LENGTHS[-1] - 1
     pieces = []
     for low in range(0, max(len(frequencies), 1), longest):
@@ -1989,7 +2014,7 @@ def _evaluate_precessing(function, frequencies, start, intrinsic, *arguments):
         length = next(n for n in MLGW_BNS_PRECESSING_LENGTHS if n > len(piece))
         grid = np.concatenate([[start], piece])
         grid = np.pad(grid, (0, length - len(grid)), mode="edge")
-        out = function(intrinsic, grid, *arguments)
+        out = function(intrinsic, grid, *arguments, angles=angles)
         pieces.append([np.asarray(x)[0, :, 1:len(piece) + 1] for x in out])
     return [np.concatenate(parts, axis=-1) for parts in zip(*pieces)]
 

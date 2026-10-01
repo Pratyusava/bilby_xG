@@ -5,8 +5,10 @@ likelihood, for samplers that propose many points at once (e.g. nessai).
 
 Prototype. :class:`BatchedRelativeBinningLikelihood` wraps an existing
 :class:`~bilby_xG.likelihood.RelativeBinningGravitationalWaveTransientNextGenerationModebyMode`
-built with :func:`~bilby_xG.source.mlgw_bns_individual_modes`, and reuses
-its bins, fiducial waveforms and summary data. Its
+built with :func:`~bilby_xG.source.mlgw_bns_individual_modes` or
+:func:`~bilby_xG.source.mlgw_bns_precessing_individual_modes` (either
+``precessing_scheme``), and reuses its bins, fiducial waveforms and summary
+data. Its
 :meth:`~BatchedRelativeBinningLikelihood.log_likelihood_ratio` takes a
 dict of parameter *arrays* and evaluates all of them in a single jitted
 JAX function: the mlgw_bns surrogate, evaluated for the whole batch at once
