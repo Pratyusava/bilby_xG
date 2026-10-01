@@ -87,6 +87,14 @@ _SHARED_RESPONSE_KEYS = (
     "vG", "a", "A", "luminosity_distance", "H0")
 
 
+def _clear_waveform_cache(waveform_generator):
+    """Forget the generator's last waveform: bilby's cache is keyed by the
+    parameters alone, so after a change of its waveform arguments (bin edges,
+    return_twist) it would return the waveform made with the old ones."""
+    if hasattr(waveform_generator, "_cache"):
+        waveform_generator._cache = dict(parameters=None, waveform=None, model=None)
+
+
 def split_scheme_coefficients(ratio, slow, bin_widths):
     """The per-bin coefficients of scheme 1 of Leslie, Dai & Pratten 2021
     (arXiv:2109.09872): ``ratio`` and ``slow`` given at the bin edges (last
@@ -805,6 +813,7 @@ class RelativeBinningGravitationalWaveTransientNextGenerationModebyMode(Gravitat
         if precessing_scheme == "split":
             # the source gives each mode's co-precessing part and twist
             waveform_generator.waveform_arguments["return_twist"] = True
+            _clear_waveform_cache(waveform_generator)
         if injection is not None:
             if time_marginalization:
                 raise ValueError(
@@ -989,6 +998,7 @@ class RelativeBinningGravitationalWaveTransientNextGenerationModebyMode(Gravitat
             f"({selection_description}).")
 
         self.waveform_generator.waveform_arguments["frequency_bin_edges"] = self.bin_freqs
+        _clear_waveform_cache(self.waveform_generator)
         self.bin_widths = self.bin_freqs[1:] - self.bin_freqs[:-1]
         self.bin_centers = (self.bin_freqs[1:] + self.bin_freqs[:-1]) / 2
 
@@ -1697,6 +1707,12 @@ class RelativeBinningGravitationalWaveTransientNextGenerationModebyMode(Gravitat
         in the offset from the bin centre."""
         name = interferometer.name
         r0, r1 = {}, {}
+        if any("coprecessing" not in waveform_polarizations[f"{ell},{emm}"]
+               for ell, emm in self.mode_array):
+            raise ValueError(
+                "precessing_scheme='split' needs the twist of each mode: a precessing "
+                "source with the return_twist waveform argument (set by this likelihood "
+                "on its waveform generator; was it changed or shared?)")
         factors = interferometer.get_detector_response_for_frequency_dependent_antenna_response(
             waveform_polarizations={f"{ell},{emm}": waveform_polarizations[f"{ell},{emm}"]
                                     for ell, emm in self.mode_array},

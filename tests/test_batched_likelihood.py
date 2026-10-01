@@ -74,7 +74,7 @@ def test_batched_likelihood_out_of_range_is_minus_infinity(likelihoods):
     assert batched.log_likelihood_ratio(dict(injection, chi_1=0.9)) == -np.inf
 
 
-def _precessing_setup(precessing_scheme="ratio"):
+def _precessing_setup(precessing_scheme="ratio", wfg=None):
     from bilby_xG.batched import BatchedRelativeBinningLikelihood
     from bilby_xG.injection import SummaryDataInjection
     from bilby_xG.likelihood import (
@@ -91,12 +91,13 @@ def _precessing_setup(precessing_scheme="ratio"):
         phi_12=1.0, phi_jl=0.7, lambda_1=400.0, lambda_2=600.0, luminosity_distance=400.0,
         theta_jn=0.4, psi=1.0, phase=1.3, geocent_time=1187008882.4, ra=3.4, dec=-0.4)
     modes = [list(mode) for mode in MLGW_BNS_MODES]
-    wfg = WaveformGenerator(
-        duration=duration, sampling_frequency=4096,
-        frequency_domain_source_model=mlgw_bns_precessing_individual_modes,
-        parameter_conversion=convert_to_mlgw_bns_precessing_parameters,
-        waveform_arguments=dict(minimum_frequency=fmin, maximum_frequency=fmax,
-                                reference_frequency=fmin, mode_array=modes))
+    if wfg is None:
+        wfg = WaveformGenerator(
+            duration=duration, sampling_frequency=4096,
+            frequency_domain_source_model=mlgw_bns_precessing_individual_modes,
+            parameter_conversion=convert_to_mlgw_bns_precessing_parameters,
+            waveform_arguments=dict(minimum_frequency=fmin, maximum_frequency=fmax,
+                                    reference_frequency=fmin, mode_array=modes))
     start_time = injection["geocent_time"] + 2 - duration
     data = SummaryDataInjection(wfg, injection, start_time, fmin, fmax, noise=False)
     numpy_likelihood = Likelihood(
@@ -113,8 +114,13 @@ def precessing_likelihoods():
 
 
 @pytest.fixture(scope="module")
-def split_likelihoods():
-    return _precessing_setup("split")
+def split_likelihoods(precessing_likelihoods):
+    # a used generator, as from a pickled run: its cached waveform at the
+    # fiducial point (without the twist, on other bin edges) must not be reused
+    import copy
+    wfg = copy.deepcopy(precessing_likelihoods[1].waveform_generator)
+    assert wfg._cache["waveform"] is not None
+    return _precessing_setup("split", wfg=wfg)
 
 
 def _precessing_samples(injection, n, seed):
