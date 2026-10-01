@@ -69,12 +69,72 @@ def mlgw_bns_jax_modes(model, mode_array):
     return modes
 
 
+def mlgw_bns_precessing_jax_modes(mode_array, frequencies, waveform_arguments, twist=False):
+    """A JAX function evaluating selected precessing mlgw_bns modes for a
+    batch, at fixed ``frequencies``.
+
+    Returns ``modes(p) -> (plus, cross)``, or with ``twist`` ``modes(p) ->
+    (coprecessing, c_plus, c_cross)`` (``plus = c_plus * coprecessing``),
+    each of shape ``(n, n_modes, n_freqs)``, with ``p`` a dict of arrays of shape ``(n,)``: ``q >= 1``,
+    ``lambda_1``, ``lambda_2``, ``total_mass``, ``distance`` and the LVK
+    spins ``a_1, a_2, tilt_1, tilt_2, phi_12, phi_jl, theta_jn, phase``. The
+    same per-mode polarisations as
+    :func:`bilby_xG.source.mlgw_bns_precessing_individual_modes` with the
+    ``waveform_arguments`` (``reference_frequency``, ``minimum_frequency``,
+    ``precession_n_steps``), including the start of the precession
+    integration (up to the rounding of the surrogate's regressors). Rows
+    outside the surrogate's range are NaN.
+    """
+    import jax.numpy as jnp
+    from mlgw_bns.precessing_model import PrecessingModel
+    from mlgw_bns.spin_conversion import lvk_to_precessing
+
+    from .source import (MLGW_BNS_PRECESSION_STEPS, _mlgw_bns_model,
+                         mlgw_bns_precessing_start_frequency)
+
+    frequencies = np.asarray(frequencies, dtype=float)
+    reference_frequency = float(waveform_arguments.get("reference_frequency", 50.0))
+    n_steps = int(waveform_arguments.get("precession_n_steps", MLGW_BNS_PRECESSION_STEPS))
+    start = mlgw_bns_precessing_start_frequency(
+        frequencies, waveform_arguments.get("minimum_frequency"))
+    in_band = frequencies >= start
+    # the angles are integrated from the first frequency
+    grid = np.concatenate([[start], frequencies[in_band]])
+    predict = PrecessingModel(_mlgw_bns_model()).jax_predict_modes(mode_array, n_steps)
+
+    def modes(p):
+        q = p["q"]
+        orientation = lvk_to_precessing(
+            p["theta_jn"], p["phi_jl"], p["tilt_1"], p["tilt_2"], p["phi_12"], p["a_1"],
+            p["a_2"], p["total_mass"] * q / (1 + q), p["total_mass"] / (1 + q),
+            reference_frequency, p["phase"], xp=jnp)
+        intrinsic = jnp.concatenate([
+            jnp.stack([q, p["lambda_1"], p["lambda_2"]], axis=1),
+            orientation.chi_1, orientation.chi_2], axis=1)
+        coprecessing, c_plus, c_cross = predict(
+            intrinsic, jnp.asarray(grid), p["total_mass"], p["distance"],
+            orientation.inclination, orientation.azimuth, orientation.reference_phase,
+            reference_frequency)
+        shape = coprecessing.shape[:2] + (len(frequencies),)
+        index = np.flatnonzero(in_band)
+
+        def full(values):
+            return jnp.zeros(shape, complex).at[..., index].set(values[..., 1:])
+
+        # hx with LALSuite's sign, as the numpy source
+        if twist:
+            return full(coprecessing), full(c_plus), full(-c_cross)
+        return full(c_plus * coprecessing), full(-c_cross * coprecessing)
+
+    return modes
+
+
 def _antenna_response(geometry, frame, frequencies, ifo_time, flags, geocentre_delay,
-                      direction_at_coalescence):
+                      direction_at_coalescence, split=False):
     """``Interferometer.frequency_dependent_antenna_response`` (general
     relativity) in JAX, for one detector, given the wave frame, the
     detector-independent delay and the source direction in Earth-fixed axes
-    at coalescence."""
+    at coalescence; with ``split``, ``(fps, fcs, delay_phase)``."""
     import jax.numpy as jnp
 
     earth_rotation_time_delay, earth_rotation_beam_patterns, finite_size = flags
@@ -108,6 +168,8 @@ def _antenna_response(geometry, frame, frequencies, ifo_time, flags, geocentre_d
         vertex_distance = direction_at_coalescence @ geometry["vertex"]
     ifo_times = ifo_time + geocentre_delay - vertex_distance / speed_of_light
     exp_fac = jnp.exp(-2j * math.pi * frequencies * ifo_times)
+    if split:
+        return fps, fcs, exp_fac
     return fps * exp_fac, fcs * exp_fac
 
 
@@ -172,14 +234,18 @@ class BatchedRelativeBinningLikelihood(Likelihood):
     def __init__(self, likelihood, batch_size=256):
         import jax
 
-        from .source import _mlgw_bns_model, mlgw_bns_individual_modes
+        from .source import (_mlgw_bns_model, mlgw_bns_individual_modes,
+                             mlgw_bns_precessing_individual_modes)
 
         super().__init__()
         self.likelihood = likelihood
         self.batch_size = int(batch_size)
         wfg = likelihood.waveform_generator
-        if wfg.frequency_domain_source_model is not mlgw_bns_individual_modes:
-            raise NotImplementedError("the batched likelihood supports mlgw_bns_individual_modes only")
+        source = wfg.frequency_domain_source_model
+        if source not in (mlgw_bns_individual_modes, mlgw_bns_precessing_individual_modes):
+            raise NotImplementedError("the batched likelihood supports mlgw_bns_individual_modes "
+                                      "and mlgw_bns_precessing_individual_modes only")
+        self.precessing = source is mlgw_bns_precessing_individual_modes
         if (likelihood.distance_marginalization or likelihood.phase_marginalization
                 or likelihood.time_marginalization):
             raise NotImplementedError("marginalisation is not supported by the batched likelihood")
@@ -230,7 +296,12 @@ class BatchedRelativeBinningLikelihood(Likelihood):
             self._arrays["center"] = dict(offset=center.offset)
         else:
             self._arrays["center"] = dict(position=center.position(self.start_time))
-        self._modes = mlgw_bns_jax_modes(_mlgw_bns_model(), self.mode_array)
+        self.split = getattr(likelihood, "precessing_scheme", "ratio") == "split"
+        if self.precessing:
+            self._modes = mlgw_bns_precessing_jax_modes(
+                self.mode_array, self.frequencies, wfg.waveform_arguments, twist=self.split)
+        else:
+            self._modes = mlgw_bns_jax_modes(_mlgw_bns_model(), self.mode_array)
         self._batched = jax.jit(self._batch)
 
     def _batch(self, p, arrays):
@@ -238,16 +309,24 @@ class BatchedRelativeBinningLikelihood(Likelihood):
         import jax
         import jax.numpy as jnp
 
-        theta = jnp.stack([p["q"], p["lambda_1"], p["lambda_2"], p["chi_1"], p["chi_2"]], axis=1)
-        plus, cross = self._modes(theta, p["total_mass"], p["distance"], p["inclination"],
-                                  p["phase"], arrays["frequencies"])
-        ln_l = jax.vmap(self._project, in_axes=(0, 0, 0, None))(p, plus, cross, arrays)
+        if self.precessing:
+            modes = self._modes(p)
+        else:
+            theta = jnp.stack([p["q"], p["lambda_1"], p["lambda_2"], p["chi_1"], p["chi_2"]],
+                              axis=1)
+            modes = self._modes(theta, p["total_mass"], p["distance"], p["inclination"],
+                                p["phase"], arrays["frequencies"])
+        ln_l = jax.vmap(self._project, in_axes=(0, 0, None))(p, modes, arrays)
         # outside the surrogate's range: outside the support
         return jnp.where(jnp.isnan(ln_l), -jnp.inf, ln_l)
 
-    def _project(self, p, plus, cross, arrays):
-        """ln L ratio for one parameter set, given its modes ``(n_modes, n_freqs)``."""
+    def _project(self, p, modes, arrays):
+        """ln L ratio for one parameter set, given its modes ``(plus, cross)``
+        (with ``precessing_scheme="split"``, ``(coprecessing, c_plus,
+        c_cross)``), each ``(n_modes, n_freqs)``."""
         import jax.numpy as jnp
+
+        from .likelihood import split_scheme_coefficients
 
         f = arrays["frequencies"]
         ifo_time = p["geocent_time"] - self.start_time
@@ -271,13 +350,26 @@ class BatchedRelativeBinningLikelihood(Likelihood):
                 direction = jnp.stack([
                     jnp.cos(p["dec"]) * jnp.cos(p["ra"] - p["gmst"]),
                     jnp.cos(p["dec"]) * jnp.sin(p["ra"] - p["gmst"]), jnp.sin(p["dec"])])
-                fps, fcs = _antenna_response(geometry, frames[emm][0], f, ifo_time, self._flags,
-                                             frames[emm][1], direction)
-                strains.append(plus[k] * fps + cross[k] * fcs)
+                response = _antenna_response(geometry, frames[emm][0], f, ifo_time, self._flags,
+                                             frames[emm][1], direction, split=self.split)
+                if self.split:
+                    coprecessing, c_plus, c_cross = modes
+                    fps, fcs, delay_phase = response
+                    strains.append(jnp.stack([delay_phase * coprecessing[k],
+                                              c_plus[k] * fps + c_cross[k] * fcs]))
+                else:
+                    plus, cross = modes
+                    fps, fcs = response
+                    strains.append(plus[k] * fps + cross[k] * fcs)
             ratios.append(jnp.stack(strains))
-        ratio = jnp.stack(ratios) / arrays["reference"]  # (ifo, mode, edge)
-        r0 = 0.5 * (ratio[..., 1:] + ratio[..., :-1])
-        r1 = (ratio[..., 1:] - ratio[..., :-1]) / arrays["bin_widths"]
+        if self.split:
+            factors = jnp.stack(ratios)  # (ifo, mode, fast/slow, edge)
+            r0, r1 = split_scheme_coefficients(
+                factors[:, :, 0] / arrays["reference"], factors[:, :, 1], arrays["bin_widths"])
+        else:
+            ratio = jnp.stack(ratios) / arrays["reference"]  # (ifo, mode, edge)
+            r0 = 0.5 * (ratio[..., 1:] + ratio[..., :-1])
+            r1 = (ratio[..., 1:] - ratio[..., :-1]) / arrays["bin_widths"]
         d_inner_h = jnp.sum(arrays["a0"] * jnp.conj(r0) + arrays["a1"] * jnp.conj(r1))
         h_inner_h = jnp.sum(
             arrays["b0"] * r0[:, :, None] * jnp.conj(r0[:, None, :])
@@ -304,12 +396,18 @@ class BatchedRelativeBinningLikelihood(Likelihood):
         q = np.asarray(converted["q"], dtype=float)
         inputs = dict(
             q=np.where(q <= 1, 1 / q, q), lambda_1=converted["LambdaAl2"],
-            lambda_2=converted["LambdaBl2"], chi_1=converted["chi1z"], chi_2=converted["chi2z"],
-            total_mass=converted["M"], distance=converted["distance"],
-            inclination=converted["inclination"], phase=converted["coalescence_angle"],
-            mass_1=converted["mass_1"], mass_2=converted["mass_2"], ra=converted["ra"],
-            dec=converted["dec"], psi=converted["psi"], geocent_time=times,
-            gmst=gmst, gmst_rate=gmst_rate)
+            lambda_2=converted["LambdaBl2"], total_mass=converted["M"],
+            distance=converted["distance"], mass_1=converted["mass_1"],
+            mass_2=converted["mass_2"], ra=converted["ra"], dec=converted["dec"],
+            psi=converted["psi"], geocent_time=times, gmst=gmst, gmst_rate=gmst_rate)
+        if self.precessing:
+            inputs.update({key: converted[key] for key in (
+                "chi_1", "chi_2", "a_1", "a_2", "tilt_1", "tilt_2", "phi_12", "phi_jl",
+                "theta_jn", "phase")})
+        else:
+            inputs.update(chi_1=converted["chi1z"], chi_2=converted["chi2z"],
+                          inclination=converted["inclination"],
+                          phase=converted["coalescence_angle"])
         return {key: np.broadcast_to(np.asarray(value, dtype=float), (size,))
                 for key, value in inputs.items()}, size
 

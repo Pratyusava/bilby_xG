@@ -310,7 +310,7 @@ class Interferometer(_Interferometer):
             times_to_coalescence, propagation=None,
             earth_rotation_time_delay=True, earth_rotation_beam_patterns=True,
             finite_size=True, wave_frame=None, orbital_motion=True,
-            center=None, geocentre_delay=None):
+            center=None, geocentre_delay=None, split=False):
         """Frequency-dependent plus/cross antenna response.
 
         See Nishizawa et al. (2009) arXiv:0903.0528 for the polarisation
@@ -350,11 +350,17 @@ class Interferometer(_Interferometer):
         geocentre_delay: array_like, optional
             The output of :func:`bilby_xG.motion.geocentre_delay` for these
             arguments, if already computed; computed here otherwise.
+        split: bool
+            Return the arrival-time phase separately (see below).
 
         Returns
         =======
         (fps, fcs): tuple of array_like
             Complex plus and cross antenna response at each frequency.
+            With ``split``, ``(fps, fcs, delay_phase)``: the beam patterns
+            without the arrival-time phase, and that phase
+            :math:`e^{-2 \\pi i f t_{\\rm ifo}(f)}`, so that the response is
+            ``fps * delay_phase``, ``fcs * delay_phase``.
 
         Notes
         =====
@@ -422,6 +428,8 @@ class Interferometer(_Interferometer):
         ifo_times = time - start_time + delays / propagation.group_velocity(frequencies)
 
         exp_fac = np.exp(-1j * 2. * np.pi * frequencies * ifo_times)
+        if split:
+            return fps, fcs, exp_fac
         fps = fps * exp_fac
         fcs = fcs * exp_fac
         return fps, fcs
@@ -429,7 +437,8 @@ class Interferometer(_Interferometer):
     def get_detector_response_for_frequency_dependent_antenna_response(
             self, waveform_polarizations, parameters, start_time, frequencies,
             earth_rotation_time_delay=True, earth_rotation_beam_patterns=True,
-            finite_size=True, shared=None, orbital_motion=True, center=None):
+            finite_size=True, shared=None, orbital_motion=True, center=None,
+            split=False):
         """Combine waveform polarisations with the frequency-dependent response.
 
         Handles both the standard ``{"plus": ..., "cross": ...}`` polarisation
@@ -439,6 +448,16 @@ class Interferometer(_Interferometer):
         ``parameters`` via :func:`bilby_xG.propagation.build_propagation`, so
         a sampled ``vG`` or ``(a, A)`` automatically enables the corresponding
         beyond-GR physics, while their absence recovers general relativity.
+
+        With ``split`` (per-mode polarisations with the twist,
+        ``"coprecessing"``, ``"c_plus"``, ``"c_cross"``; see
+        :func:`bilby_xG.source.mlgw_bns_precessing_individual_modes`) the
+        response of each mode is returned as two factors, ``{mode_key:
+        (fast, slow)}``: ``fast`` the co-precessing mode with the
+        arrival-time and propagation phases, ``slow`` the beam patterns
+        contracted with the twist, ``c_plus * F_+ + c_cross * F_x``. Their
+        product is the mode's response. This is the split of scheme 1 of
+        Leslie, Dai & Pratten 2021 (arXiv:2109.09872).
 
         ``shared``, if given, is a dict in which the detector-independent
         part of the response (time to coalescence, propagation phase and
@@ -465,7 +484,7 @@ class Interferometer(_Interferometer):
             shared = {}
         earth_rotation = earth_rotation_time_delay or earth_rotation_beam_patterns
 
-        def response(mode, polarizations):
+        def response(mode, polarizations, split=False):
             if mode not in shared:
                 times_to_coalescence = calculate_time_to_merger_for_any_mode(
                     frequencies, parameters['mass_1'], parameters['mass_2'],
@@ -483,7 +502,7 @@ class Interferometer(_Interferometer):
                         parameters['geocent_time'], times_to_coalescence,
                         center=center, orbital_motion=orbital_motion))
             times_to_coalescence, correction_factor, frame, geocentre_delay = shared[mode]
-            fps, fcs = self.frequency_dependent_antenna_response(
+            factors = self.frequency_dependent_antenna_response(
                 parameters['ra'], parameters['dec'], parameters['geocent_time'],
                 parameters['psi'],
                 times_to_coalescence=times_to_coalescence,
@@ -497,10 +516,19 @@ class Interferometer(_Interferometer):
                 orbital_motion=orbital_motion,
                 center=center,
                 geocentre_delay=geocentre_delay,
+                split=split,
             )
+            if split:
+                fps, fcs, delay_phase = factors
+                return (correction_factor * delay_phase * polarizations['coprecessing'],
+                        polarizations['c_plus'] * fps + polarizations['c_cross'] * fcs)
+            fps, fcs = factors
             return correction_factor * (
                 polarizations['plus'] * fps + polarizations['cross'] * fcs)
 
+        if split:
+            return {mode_key: response(_mode_integer(mode_key), polarizations, split=True)
+                    for mode_key, polarizations in waveform_polarizations.items()}
         if 'plus' in waveform_polarizations.keys():
             return response(2, waveform_polarizations)
         signal_ifo = np.zeros(len(frequencies), dtype=complex)

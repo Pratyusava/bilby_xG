@@ -87,6 +87,21 @@ _SHARED_RESPONSE_KEYS = (
     "vG", "a", "A", "luminosity_distance", "H0")
 
 
+def split_scheme_coefficients(ratio, slow, bin_widths):
+    """The per-bin coefficients of scheme 1 of Leslie, Dai & Pratten 2021
+    (arXiv:2109.09872): ``ratio`` and ``slow`` given at the bin edges (last
+    axis) are each linearised in every bin, as ``r0 + r1 (f - f_c)`` and
+    ``c0 + c1 (f - f_c)``, and their product is kept to first order,
+    ``r0 c0 + (r0 c1 + r1 c0) (f - f_c)``. Returns its two coefficients, which
+    take the place of the ratio's in the summary-data sums. Works on numpy
+    and JAX arrays."""
+    r0 = 0.5 * (ratio[..., 1:] + ratio[..., :-1])
+    r1 = (ratio[..., 1:] - ratio[..., :-1]) / bin_widths
+    c0 = 0.5 * (slow[..., 1:] + slow[..., :-1])
+    c1 = (slow[..., 1:] - slow[..., :-1]) / bin_widths
+    return r0 * c0, r0 * c1 + r1 * c0
+
+
 def relative_binning_bin_freqs(frequency_array, minimum_frequency, maximum_frequency,
                                 chi=1, epsilon=0.5, gamma=None):
     """Relative-binning frequency bin edges (Zackay et al. 2018, arXiv:1806.08792).
@@ -719,6 +734,22 @@ class RelativeBinningGravitationalWaveTransientNextGenerationModebyMode(Gravitat
         signal and a Gaussian-noise draw (or zero noise), and the
         interferometers get the data grid but no strain. Without it the
         summary data come from the interferometers' strain.
+    precessing_scheme: str, optional
+        How the modes of a precessing source (keyed by co-precessing
+        multipole, see
+        :func:`bilby_xG.source.mlgw_bns_precessing_individual_modes`) are
+        linearised in each bin, in the terms of Leslie, Dai & Pratten 2021
+        (arXiv:2109.09872). ``"ratio"`` (the default, their scheme 2, the
+        only one for other sources): the ratio of each mode's detector
+        response to the fiducial's. ``"split"`` (their scheme 1): the
+        response of each mode is ``fast * slow`` (see ``split`` in
+        :meth:`~bilby_xG.interferometer.Interferometer.get_detector_response_for_frequency_dependent_antenna_response`);
+        the ratio of ``fast`` to the fiducial's and ``slow`` itself are
+        linearised separately, the summary data are those of the fiducial
+        ``fast``, and their product is kept to first order in the
+        frequency offset from the bin centre. Its reference does not vanish
+        where the fiducial's twist and beam patterns do. The bins are
+        chosen with scheme 2 either way.
 
     Returns
     -------
@@ -735,6 +766,7 @@ class RelativeBinningGravitationalWaveTransientNextGenerationModebyMode(Gravitat
     # their data were built without the orbital motion, about the geocentre.
     orbital_motion = False
     center = None
+    precessing_scheme = "ratio"
 
     def __init__(self, interferometers,
                  waveform_generator,
@@ -764,8 +796,15 @@ class RelativeBinningGravitationalWaveTransientNextGenerationModebyMode(Gravitat
                  center=None,
                  summary_data_chunk_size=2 ** 20,
                  array_cache_dir=None,
-                 injection=None):
+                 injection=None,
+                 precessing_scheme="ratio"):
 
+        if precessing_scheme not in ("ratio", "split"):
+            raise ValueError(f"unknown precessing_scheme {precessing_scheme!r}")
+        self.precessing_scheme = precessing_scheme
+        if precessing_scheme == "split":
+            # the source gives each mode's co-precessing part and twist
+            waveform_generator.waveform_arguments["return_twist"] = True
         if injection is not None:
             if time_marginalization:
                 raise ValueError(
@@ -959,9 +998,7 @@ class RelativeBinningGravitationalWaveTransientNextGenerationModebyMode(Gravitat
             for mode in self.mode_array:
                 mode_key = f"{mode[0]},{mode[1]}"
                 self.per_detector_per_mode_fiducial_waveform_points[name][mode_key] = \
-                    self._project_fiducial_mode(
-                        interferometer, self._fiducial_converted_parameters,
-                        mode_key, self.bin_freqs)
+                    self._reference_mode(interferometer, mode_key, self.bin_freqs)
 
     def mode_by_mode_bin_freqs(self, test_parameters, frequency_array,
                                 minimum_frequency, maximum_frequency):
@@ -1333,13 +1370,24 @@ class RelativeBinningGravitationalWaveTransientNextGenerationModebyMode(Gravitat
             bounds.append([priors[key].minimum, priors[key].maximum])
         return bounds
 
-    def _project_fiducial_mode(self, interferometer, converted_parameters, mode_key, frequencies):
+    def _reference_mode(self, interferometer, mode_key, frequencies):
+        """The fiducial waveform the ratios and the summary data of one mode
+        refer to: its detector response, or with ``precessing_scheme="split"``
+        its ``fast`` factor."""
+        return self._project_fiducial_mode(
+            interferometer, self._fiducial_converted_parameters, mode_key, frequencies,
+            part="fast" if self.precessing_scheme == "split" else "strain")
+
+    def _project_fiducial_mode(self, interferometer, converted_parameters, mode_key, frequencies,
+                               part="strain"):
         """Project one mode's fiducial polarizations onto ``interferometer``.
 
         The fiducial polarizations for the requested ``frequencies`` are
         evaluated on demand through the waveform generator's frequency-sequence
         path, so callers can walk the band in chunks rather than building and
         storing a full-resolution detector waveform for every detector and mode.
+        ``part="fast"`` gives the ``fast`` factor of the response instead
+        (see ``precessing_scheme``).
         """
         full_frequencies = interferometer.frequency_array
         frequencies = np.asarray(frequencies)
@@ -1349,23 +1397,26 @@ class RelativeBinningGravitationalWaveTransientNextGenerationModebyMode(Gravitat
 
         mode_polarizations = self._fiducial_mode_polarizations(
             converted_parameters, mode_key, freqs)
-        waveform_polarizations_reduced = {mode_key: {
-            'plus': mode_polarizations['plus'],
-            'cross': mode_polarizations['cross'],
-        }}
+        if part == "fast":
+            keys = ('coprecessing', 'c_plus', 'c_cross')
+        else:
+            keys = ('plus', 'cross')
+        waveform_polarizations_reduced = {
+            mode_key: {key: mode_polarizations[key] for key in keys}}
 
         wf = np.zeros(len(frequencies), dtype=complex)
-        wf[above_minimum_frequency] = \
-            interferometer.get_detector_response_for_frequency_dependent_antenna_response(
-                waveform_polarizations=waveform_polarizations_reduced,
-                parameters=converted_parameters,
-                start_time=interferometer.strain_data.start_time,
-                frequencies=freqs,
-                earth_rotation_time_delay=self.earth_rotation_time_delay,
-                earth_rotation_beam_patterns=self.earth_rotation_beam_patterns,
-                finite_size=self.finite_size,
-                orbital_motion=self.orbital_motion,
-                center=self.center)
+        response = interferometer.get_detector_response_for_frequency_dependent_antenna_response(
+            waveform_polarizations=waveform_polarizations_reduced,
+            parameters=converted_parameters,
+            start_time=interferometer.strain_data.start_time,
+            frequencies=freqs,
+            earth_rotation_time_delay=self.earth_rotation_time_delay,
+            earth_rotation_beam_patterns=self.earth_rotation_beam_patterns,
+            finite_size=self.finite_size,
+            orbital_motion=self.orbital_motion,
+            center=self.center,
+            split=part == "fast")
+        wf[above_minimum_frequency] = response[mode_key][0] if part == "fast" else response
         wf[frequencies > self.maximum_frequency] = 0
         return wf
 
@@ -1483,9 +1534,8 @@ class RelativeBinningGravitationalWaveTransientNextGenerationModebyMode(Gravitat
                     psd_model.get_power_spectral_density_array(chunk_frequencies)
                     * window_power_correction)
                 chunk_h0 = {
-                    f'{ell},{emm}': self._project_fiducial_mode(
-                        interferometer, self._fiducial_converted_parameters,
-                        f'{ell},{emm}', chunk_frequencies)
+                    f'{ell},{emm}': self._reference_mode(
+                        interferometer, f'{ell},{emm}', chunk_frequencies)
                     for ell, emm in self.mode_array
                 }
 
@@ -1614,6 +1664,9 @@ class RelativeBinningGravitationalWaveTransientNextGenerationModebyMode(Gravitat
         parameters = _resolve_parameters(self, parameters)
         converted_parameters, _ = self.waveform_generator.parameter_conversion(parameters)
         shared = self._shared_response(converted_parameters)
+        if self.precessing_scheme == "split":
+            return self._split_ratio_per_interferometer(
+                waveform_polarizations, interferometer, converted_parameters, shared)
 
         for ell, emm in self.mode_array:
             mode_key = f"{ell},{emm}"
@@ -1634,6 +1687,32 @@ class RelativeBinningGravitationalWaveTransientNextGenerationModebyMode(Gravitat
             r0[mode_key] = 0.5 * (waveform_ratio[1:] + waveform_ratio[:-1])
             r1[mode_key] = (waveform_ratio[1:] - waveform_ratio[:-1]) / self.bin_widths
 
+        return r0, r1
+
+    def _split_ratio_per_interferometer(self, waveform_polarizations, interferometer,
+                                        converted_parameters, shared):
+        """``compute_waveform_ratio_per_interferometer`` for
+        ``precessing_scheme="split"``: in each bin, the linearised ratio
+        ``r = fast / fast_0`` times the linearised ``slow``, to first order
+        in the offset from the bin centre."""
+        name = interferometer.name
+        r0, r1 = {}, {}
+        factors = interferometer.get_detector_response_for_frequency_dependent_antenna_response(
+            waveform_polarizations={f"{ell},{emm}": waveform_polarizations[f"{ell},{emm}"]
+                                    for ell, emm in self.mode_array},
+            parameters=converted_parameters,
+            start_time=interferometer.strain_data.start_time,
+            frequencies=self.bin_freqs,
+            earth_rotation_time_delay=self.earth_rotation_time_delay,
+            earth_rotation_beam_patterns=self.earth_rotation_beam_patterns,
+            finite_size=self.finite_size,
+            orbital_motion=self.orbital_motion,
+            center=self.center,
+            shared=shared,
+            split=True)
+        for mode_key, (fast, slow) in factors.items():
+            ratio = fast / self.per_detector_per_mode_fiducial_waveform_points[name][mode_key]
+            r0[mode_key], r1[mode_key] = split_scheme_coefficients(ratio, slow, self.bin_widths)
         return r0, r1
 
     def _compute_full_waveform(self, signal_polarizations, interferometer, parameters=None):
@@ -1676,8 +1755,7 @@ class RelativeBinningGravitationalWaveTransientNextGenerationModebyMode(Gravitat
                 duplicated_r1[idxs] = r1[mode_key][i]
 
             full_waveform_ratio += duplicated_r0 + duplicated_r1 * (f_masked - duplicated_fm)
-            fiducial_waveform = self._project_fiducial_mode(
-                interferometer, self._fiducial_converted_parameters, mode_key, f_masked)
+            fiducial_waveform = self._reference_mode(interferometer, mode_key, f_masked)
             full_waveform_masked += full_waveform_ratio * fiducial_waveform
 
         full_waveform = np.zeros_like(f, dtype=complex)

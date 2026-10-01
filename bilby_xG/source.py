@@ -1825,6 +1825,175 @@ def mlgw_bns_individual_modes(frequency_array, M, q, chi1z, chi2z, LambdaAl2,
             for j, (ell, emm) in enumerate(modes)}
 
 
+#: Lengths the precessing source pads its frequency arrays to: each compiles
+#: its JAX function once, and longer arrays are evaluated in pieces.
+MLGW_BNS_PRECESSING_LENGTHS = (64, 256, 1024, 4096, 16384)
+
+#: Default steps of each leg of the precession integration
+#: (:func:`mlgw_bns.batched_precession.integrate_angles`).
+MLGW_BNS_PRECESSION_STEPS = 2048
+
+_MLGW_BNS_PRECESSING = {}
+_MLGW_BNS_PRECESSING_LAST = {}
+
+
+def _check_mlgw_bns_modes(mode_array):
+    modes = [(int(ell), int(emm)) for ell, emm in mode_array]
+    unknown = [mode for mode in modes if mode not in MLGW_BNS_MODES]
+    if unknown:
+        raise ValueError(f"mlgw_bns does not provide the modes {unknown}; "
+                         f"available: {MLGW_BNS_MODES}")
+    return modes
+
+
+def mlgw_bns_precessing_components(mode_array=None, n_steps=MLGW_BNS_PRECESSION_STEPS):
+    """The jitted :func:`mlgw_bns.batched_precession.precessing_mode_components`
+    of the pretrained surrogate, compiled once per process for each
+    ``(mode_array, n_steps)`` (and input shape)."""
+    import jax
+    from mlgw_bns.batched_precession import precessing_mode_components
+
+    modes = tuple(_check_mlgw_bns_modes(MLGW_BNS_MODES if mode_array is None else mode_array))
+    key = (modes, int(n_steps))
+    if key not in _MLGW_BNS_PRECESSING:
+        _MLGW_BNS_PRECESSING[key] = jax.jit(
+            precessing_mode_components(_mlgw_bns_model(), modes, int(n_steps)))
+    return _MLGW_BNS_PRECESSING[key]
+
+
+def mlgw_bns_precessing_start_frequency(frequencies, minimum_frequency=None):
+    """Where the precession angles of :func:`mlgw_bns_precessing_individual_modes`
+    are integrated from: ``minimum_frequency`` if given, else the lowest
+    positive frequency. Fixing it makes the angles, and so the waveform, the
+    same whichever frequencies (bin edges, chunks of the full grid) it is
+    evaluated at."""
+    if minimum_frequency is not None:
+        return float(minimum_frequency)
+    positive = np.asarray(frequencies)[np.asarray(frequencies) > 0]
+    return float(positive[0]) if len(positive) else 1.0
+
+
+def convert_to_mlgw_bns_precessing_parameters(parameters):
+    """``parameter_conversion`` for :func:`mlgw_bns_precessing_individual_modes`:
+    bilby ``chirp_mass``/``mass_ratio``/``lambda_1``/``lambda_2``... to the
+    arguments of the source model, which takes the LVK spins (``a_i``,
+    ``tilt_i``, ``phi_12``, ``phi_jl``, with ``theta_jn`` and ``phase``) as
+    they are; missing spin parameters are zero. Also gives ``chi_i = a_i cos
+    tilt_i``, which the detector response's time-frequency map uses."""
+    q = parameters["mass_ratio"]
+    total_mass = parameters["chirp_mass"] / (q / (1 + q) ** 2) ** (3 / 5)
+    mass_1 = total_mass / (1 + q)
+    spins = {key: parameters.get(key, 0.0)
+             for key in ("a_1", "a_2", "tilt_1", "tilt_2", "phi_12", "phi_jl")}
+    added = dict(
+        M=total_mass, q=q, mass_1=mass_1,
+        mass_2=np.clip(total_mass * q / (1 + q), 0, mass_1),
+        chi_1=spins["a_1"] * np.cos(spins["tilt_1"]),
+        chi_2=spins["a_2"] * np.cos(spins["tilt_2"]),
+        LambdaAl2=parameters["lambda_1"], LambdaBl2=parameters["lambda_2"],
+        distance=parameters["luminosity_distance"],
+    ) | spins
+    return added | parameters, list(added)
+
+
+def mlgw_bns_precessing_individual_modes(frequency_array, M, q, a_1, a_2, tilt_1, tilt_2,
+                                         phi_12, phi_jl, LambdaAl2, LambdaBl2, distance,
+                                         theta_jn, phase, **kwargs):
+    r"""Precessing tidal BNS from the mlgw_bns surrogate, as the plus/cross
+    polarisations of each twisted co-precessing mode, ``{"l,m": {"plus",
+    "cross"}}``.
+
+    Use with :func:`convert_to_mlgw_bns_precessing_parameters`. The spins are
+    the LVK ones (LALSuite's ``SimInspiralTransformPrecessingNewInitialConditions``,
+    through :func:`mlgw_bns.spin_conversion.lvk_to_precessing`), given at the
+    ``reference_frequency`` waveform argument (default 50 Hz, as bilby's),
+    with ``phase`` the orbital phase there. The key ``"l,m"`` is the
+    co-precessing multipole :math:`(\ell, m')`; its polarisations are
+    :math:`c^{+,\times}_{\ell m'}(f) \, \tilde{h}^{\rm co}_{\ell m'}(f)`
+    (:func:`mlgw_bns.batched_precession.precessing_mode_components`), whose
+    ratio to the fiducial is smooth (Leslie, Dai and Pratten 2021, scheme 2)
+    and whose time-frequency map is that of the co-precessing mode, which the
+    detector response takes from the key's ``m``.
+
+    ``hx`` follows LALSuite: it is minus mlgw_bns' (see mlgw_bns' known
+    issues), so the polarisations agree with IMRPhenomXPHM's in the same
+    parameters (the aligned :func:`mlgw_bns_individual_modes` keeps
+    mlgw_bns' own sign).
+
+    Evaluated on the ``frequency_bin_edges`` waveform argument when given,
+    otherwise on ``frequency_array``; zero below ``minimum_frequency``
+    (where the precession angles are integrated from; see
+    :func:`mlgw_bns_precessing_start_frequency`). Other waveform arguments:
+    ``mode_array``, ``precession_n_steps`` (default
+    :data:`MLGW_BNS_PRECESSION_STEPS`) and ``return_twist``: if true each
+    mode also has ``"coprecessing"``, ``"c_plus"`` and ``"c_cross"``, with
+    ``plus = c_plus * coprecessing`` and ``cross = c_cross * coprecessing``.
+    """
+    from mlgw_bns.spin_conversion import lvk_to_precessing
+
+    freqs = np.asarray(kwargs.get("frequency_bin_edges", frequency_array), dtype=float)
+    modes = _check_mlgw_bns_modes(kwargs.get("mode_array", MLGW_BNS_MODES))
+    n_steps = int(kwargs.get("precession_n_steps", MLGW_BNS_PRECESSION_STEPS))
+    reference_frequency = float(kwargs.get("reference_frequency", 50.0))
+    start = mlgw_bns_precessing_start_frequency(freqs, kwargs.get("minimum_frequency"))
+    in_band = freqs >= start
+
+    q = max(q, 1.0 / q)  # m1 / m2 >= 1
+    arguments = (M, q, a_1, a_2, tilt_1, tilt_2, phi_12, phi_jl, LambdaAl2, LambdaBl2,
+                 distance, theta_jn, phase, reference_frequency, start, n_steps)
+    # the same binary at the same frequencies, mode by mode (the fiducial
+    # waveform is evaluated that way): reuse the precession angles
+    cache_key = (tuple(float(x) for x in arguments), len(freqs), hash(freqs.tobytes()))
+    if _MLGW_BNS_PRECESSING_LAST.get("key") != cache_key:
+        orientation = lvk_to_precessing(
+            theta_jn, phi_jl, tilt_1, tilt_2, phi_12, a_1, a_2, M * q / (1 + q), M / (1 + q),
+            reference_frequency, phase)
+        intrinsic = np.array([[q, LambdaAl2, LambdaBl2, *orientation.chi_1,
+                               *orientation.chi_2]])
+        components = _evaluate_precessing(
+            mlgw_bns_precessing_components(MLGW_BNS_MODES, n_steps), freqs[in_band], start,
+            intrinsic, M, distance, orientation.inclination, orientation.azimuth,
+            orientation.reference_phase, reference_frequency)
+        if not all(np.all(np.isfinite(x)) for x in components):
+            raise ValueError("Parameters outside the range of the mlgw_bns surrogate")
+        _MLGW_BNS_PRECESSING_LAST.update(key=cache_key, components=components)
+    coprecessing, c_plus, c_cross = _MLGW_BNS_PRECESSING_LAST["components"]
+
+    def full(values):
+        out = np.zeros(len(freqs), dtype=complex)
+        out[in_band] = values
+        return out
+
+    polarizations = {}
+    for ell, emm in modes:
+        j = MLGW_BNS_MODES.index((ell, emm))
+        # hx with LALSuite's sign
+        mode = {"plus": full(c_plus[j] * coprecessing[j]),
+                "cross": full(-c_cross[j] * coprecessing[j])}
+        if kwargs.get("return_twist", False):
+            mode.update(coprecessing=full(coprecessing[j]), c_plus=full(c_plus[j]),
+                        c_cross=full(-c_cross[j]))
+        polarizations[f"{ell},{emm}"] = mode
+    return polarizations
+
+
+def _evaluate_precessing(function, frequencies, start, intrinsic, *arguments):
+    """``function`` (a :func:`mlgw_bns_precessing_components`) for one binary
+    at ``frequencies``, each piece with ``start`` prepended (the start of the
+    angle integration) and padded to one of :data:`MLGW_BNS_PRECESSING_LENGTHS`.
+    Returns ``(coprecessing, c_plus, c_cross)``, of shape ``(n_modes, k)``."""
+    longest = MLGW_BNS_PRECESSING_LENGTHS[-1] - 1
+    pieces = []
+    for low in range(0, max(len(frequencies), 1), longest):
+        piece = frequencies[low:low + longest]
+        length = next(n for n in MLGW_BNS_PRECESSING_LENGTHS if n > len(piece))
+        grid = np.concatenate([[start], piece])
+        grid = np.pad(grid, (0, length - len(grid)), mode="edge")
+        out = function(intrinsic, grid, *arguments)
+        pieces.append([np.asarray(x)[0, :, 1:len(piece) + 1] for x in out])
+    return [np.concatenate(parts, axis=-1) for parts in zip(*pieces)]
+
+
 # ---------------------------------------------------------------------------
 # TEOBResumS SPA (optional dependency: the ``EOBRun_module`` extension built
 # from https://bitbucket.org/teobresums/teobresums, ``Python/`` directory)
