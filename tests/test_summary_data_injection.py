@@ -147,3 +147,33 @@ def test_likelihood_pickled_before_the_motion():
     del old.orbital_motion, old.center
     old = pickle.loads(pickle.dumps(old))
     assert [_log_likelihood_ratio(old, p) for p in (INJECTION, OTHER)] == expected[::-1]
+
+
+def test_summary_data_centred_on_the_bins():
+    """a1 and b1 take f - f_c about the bin centre the ratios refer to, the
+    midpoint of the bin edges, not about the midpoint of the samples in the
+    bin (which differs by up to a sample spacing)."""
+    likelihood = _likelihood(noise=False)
+    ifo = likelihood.interferometers[0]
+    frequencies = ifo.frequency_array[ifo.frequency_mask]
+    bin_inds = np.searchsorted(frequencies, likelihood.bin_freqs)
+    strain = likelihood.injection.signal(ifo, frequencies)
+    psd = ifo.power_spectral_density.get_power_spectral_density_array(frequencies)
+    key = "2,2"
+    h0 = likelihood._reference_mode(ifo, key, frequencies)
+    offsets = []
+    for i in range(0, likelihood.number_of_bins, 7):
+        idxs = slice(bin_inds[i], bin_inds[i + 1])
+        delta = frequencies[idxs] - likelihood.bin_centers[i]
+        offsets.append(abs(likelihood.bin_centers[i]
+                           - (frequencies[idxs][0] + frequencies[idxs][-1]) / 2))
+        expected_a1 = noise_weighted_inner_product(
+            h0[idxs], strain[idxs] * delta, psd[idxs], DURATION)
+        expected_b1 = noise_weighted_inner_product(
+            h0[idxs], h0[idxs] * delta, psd[idxs], DURATION)
+        np.testing.assert_allclose(likelihood.summary_data[ifo.name]["a1"][key][i],
+                                   expected_a1, rtol=1e-8)
+        np.testing.assert_allclose(likelihood.summary_data[ifo.name]["b1"][key][key][i],
+                                   expected_b1, rtol=1e-8)
+    # the two centres do differ for these bins
+    assert max(offsets) > 0.1 / DURATION

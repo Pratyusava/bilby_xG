@@ -1561,8 +1561,11 @@ class RelativeBinningGravitationalWaveTransientNextGenerationModebyMode(Gravitat
                                  masked_bin_inds[i + 1] - chunk_lo)
 
                     frequencies = chunk_frequencies[idxs]
-                    central_frequency = (frequencies[0] + frequencies[-1]) / 2
-                    delta_frequency = frequencies - central_frequency
+                    # the centre the ratios' r0 refer to (the midpoint of the
+                    # bin edges), not that of the samples in the bin: they
+                    # differ by up to a sample spacing, an error of r1 times
+                    # it which more bins do not reduce
+                    delta_frequency = frequencies - self.bin_centers[i]
 
                     strain = chunk_strain[idxs]
                     psd = chunk_psd[idxs]
