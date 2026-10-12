@@ -253,10 +253,11 @@ class BatchedRelativeBinningLikelihood(Likelihood):
         merger ``(n_modes, n_freqs)``."""
         import jax.numpy as jnp
 
-        d_inner_h, h_inner_h = self._bin_inner_products(p, plus, cross, arrays)
+        d_inner_h, h_inner_h = self._bin_inner_products(
+            p, plus, cross, time_to_merger, arrays)
         return jnp.sum(d_inner_h) - jnp.sum(h_inner_h) / 2
 
-    def _bin_inner_products(self, p, plus, cross, arrays):
+    def _bin_inner_products(self, p, plus, cross, time_to_merger, arrays):
         """Re (d|h) and (h|h) of one parameter set in every bin, each
         ``(n_bins,)``, summed over detectors and modes."""
         import jax.numpy as jnp
@@ -393,11 +394,12 @@ class BatchedTruncatedMixtureLikelihood(BatchedRelativeBinningLikelihood):
         self.edges = edges
         self.log_evidences = log_evidences
 
-    def _project(self, p, plus, cross, arrays):
+    def _project(self, p, plus, cross, time_to_merger, arrays):
         import jax.numpy as jnp
         from jax.scipy.special import logsumexp
 
-        d_inner_h, h_inner_h = self._bin_inner_products(p, plus, cross, arrays)
+        d_inner_h, h_inner_h = self._bin_inner_products(
+            p, plus, cross, time_to_merger, arrays)
         cumulative = jnp.concatenate([jnp.zeros(1), jnp.cumsum(d_inner_h - h_inner_h / 2)])
         return logsumexp(cumulative[self.edges] - self.log_evidences)
 
