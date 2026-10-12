@@ -111,6 +111,19 @@ def test_einstein_telescope_triangle_resolves_by_name():
     assert all("HFLF" in ifo.power_spectral_density.psd_file for ifo in et)
 
 
+def test_einstein_telescope_triangle_vertices():
+    # an equilateral triangle, with the second and third vertices at the end
+    # of the first channel's x and y arms (bilby-dev/bilby#1016)
+    et = get_empty_interferometer("ET-EMR")
+    vertices = [ifo.vertex for ifo in et]
+    for i in range(3):
+        side = np.linalg.norm(vertices[(i + 1) % 3] - vertices[i])
+        np.testing.assert_allclose(side, 10e3, rtol=5e-3)
+    for arm, vertex in zip([et[0].geometry.x, et[0].geometry.y], vertices[1:]):
+        edge = vertex - vertices[0]
+        np.testing.assert_allclose(arm @ edge / np.linalg.norm(edge), 1, atol=1e-5)
+
+
 def test_einstein_telescope_network():
     ifos = InterferometerList(["ET_1L_IT", "ET_1L_DE"])
     assert [ifo.name for ifo in ifos] == ["ET_1L_IT", "ET_1L_DE"]

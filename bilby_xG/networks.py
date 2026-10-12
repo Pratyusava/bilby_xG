@@ -83,6 +83,12 @@ class TriangularInterferometer(_networks.TriangularInterferometer):
         # If ``colocated`` is True, the three channels share the same latitude
         # and longitude (only the arm azimuths are rotated by 240 degrees),
         # instead of being displaced along the vertices of the triangle.
+        #
+        # Each next vertex is at the end of the current channel's x arm, a
+        # great-circle step of ``length`` along it, as in upstream bilby
+        # (bilby-dev/bilby#1016). The former flat step along the *next*
+        # channel's x arm put the second and third vertices on the wrong
+        # side of the first one.
         list.__init__(self)
         self.name = name
         if isinstance(power_spectral_density, _PowerSpectralDensity):
@@ -92,6 +98,10 @@ class TriangularInterferometer(_networks.TriangularInterferometer):
         if isinstance(maximum_frequency, (int, float)):
             maximum_frequency = [maximum_frequency] * 3
 
+        # bearing of the x arm, clockwise from North (the azimuth is
+        # counter-clockwise from East)
+        bearing = np.radians(90 - xarm_azimuth)
+        angular_length = length * 1e3 / utils.radius_of_earth
         for ii in range(3):
             self.append(Interferometer(
                 "{}{}".format(name, ii + 1), power_spectral_density[ii],
@@ -99,15 +109,19 @@ class TriangularInterferometer(_networks.TriangularInterferometer):
                 longitude, elevation, xarm_azimuth, yarm_azimuth, xarm_tilt,
                 yarm_tilt))
 
+            if not colocated:
+                phi1 = np.radians(latitude)
+                phi2 = np.arcsin(
+                    np.sin(phi1) * np.cos(angular_length)
+                    + np.cos(phi1) * np.sin(angular_length) * np.cos(bearing))
+                longitude += np.degrees(np.arctan2(
+                    np.sin(bearing) * np.sin(angular_length) * np.cos(phi1),
+                    np.cos(angular_length) - np.sin(phi1) * np.sin(phi2)))
+                latitude = np.degrees(phi2)
+
+            bearing += np.radians(240)
             xarm_azimuth += 240
             yarm_azimuth += 240
-            if not colocated:
-                latitude += np.arctan(
-                    length * np.sin(xarm_azimuth * np.pi / 180) * 1e3
-                    / utils.radius_of_earth) * 180 / np.pi
-                longitude += np.arctan(
-                    length * np.cos(xarm_azimuth * np.pi / 180) * 1e3
-                    / utils.radius_of_earth) * 180 / np.pi
 
 
 def load_interferometer(filename, **overrides):
