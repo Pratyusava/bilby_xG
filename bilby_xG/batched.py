@@ -249,6 +249,14 @@ class BatchedRelativeBinningLikelihood(Likelihood):
         """ln L ratio for one parameter set, given its modes ``(n_modes, n_freqs)``."""
         import jax.numpy as jnp
 
+        d_inner_h, h_inner_h = self._bin_inner_products(p, plus, cross, arrays)
+        return jnp.sum(d_inner_h) - jnp.sum(h_inner_h) / 2
+
+    def _bin_inner_products(self, p, plus, cross, arrays):
+        """Re (d|h) and (h|h) of one parameter set in every bin, each
+        ``(n_bins,)``, summed over detectors and modes."""
+        import jax.numpy as jnp
+
         f = arrays["frequencies"]
         ifo_time = p["geocent_time"] - self.start_time
         earth_rotation = self._flags[0] or self._flags[1]
@@ -278,12 +286,13 @@ class BatchedRelativeBinningLikelihood(Likelihood):
         ratio = jnp.stack(ratios) / arrays["reference"]  # (ifo, mode, edge)
         r0 = 0.5 * (ratio[..., 1:] + ratio[..., :-1])
         r1 = (ratio[..., 1:] - ratio[..., :-1]) / arrays["bin_widths"]
-        d_inner_h = jnp.sum(arrays["a0"] * jnp.conj(r0) + arrays["a1"] * jnp.conj(r1))
+        d_inner_h = jnp.sum(arrays["a0"] * jnp.conj(r0) + arrays["a1"] * jnp.conj(r1),
+                            axis=(0, 1))
         h_inner_h = jnp.sum(
             arrays["b0"] * r0[:, :, None] * jnp.conj(r0[:, None, :])
             + arrays["b1"] * (r0[:, :, None] * jnp.conj(r1[:, None, :])
-                              + jnp.conj(r0[:, None, :]) * r1[:, :, None]))
-        return jnp.real(d_inner_h) - jnp.real(h_inner_h) / 2
+                              + jnp.conj(r0[:, None, :]) * r1[:, :, None]), axis=(0, 1, 2))
+        return jnp.real(d_inner_h), jnp.real(h_inner_h)
 
     def _inputs(self, parameters):
         """Converted parameter arrays for the JAX function."""
@@ -334,6 +343,60 @@ class BatchedRelativeBinningLikelihood(Likelihood):
 
     def log_likelihood(self, parameters=None):
         return self.log_likelihood_ratio(parameters) + self.noise_log_likelihood()
+
+
+class BatchedTruncatedMixtureLikelihood(BatchedRelativeBinningLikelihood):
+    r"""Mixture of the likelihoods of the data truncated at several
+    frequencies, evaluated as :class:`BatchedRelativeBinningLikelihood`.
+
+    With :math:`\ln L_i` the log-likelihood ratio of the data in the bins
+    below the bin edge ``edges[i]`` (an index into ``bin_freqs``), and
+    :math:`\ln Z_i` = ``log_evidences[i]``, this is
+
+    .. math:: \ln L = \ln \sum_i L_i / Z_i,
+
+    whose posterior is the mixture of the truncated-data posteriors, with
+    weights proportional to the ratios of their true evidences to the
+    :math:`Z_i` given (equal if those are exact). A nested-sampling run on it
+    is then an importance sample for every truncated-data posterior: with the
+    run's prior-volume elements :math:`\Delta X_j`, the weights
+    :math:`L_i(\theta_j) \Delta X_j` have
+    :math:`L_i / Z_i \leq L`, so each posterior gets about a fraction
+    :math:`Z_i^\mathrm{true} / (Z_i \sum_k Z_k^\mathrm{true} / Z_k)` of the
+    run's effective samples (early-warning localisation from one run).
+
+    Parameters
+    ----------
+    likelihood, batch_size
+        As :class:`BatchedRelativeBinningLikelihood`.
+    edges : sequence of int
+        Increasing bin-edge indices, from 1 to ``number_of_bins`` (the whole
+        band).
+    log_evidences : sequence of float
+        :math:`\ln Z_i`, one per edge: estimates of the truncated-data log
+        Bayes factors against noise.
+    """
+
+    def __init__(self, likelihood, edges, log_evidences, batch_size=256):
+        super().__init__(likelihood, batch_size=batch_size)
+        edges = np.asarray(edges, dtype=int)
+        log_evidences = np.asarray(log_evidences, dtype=float)
+        if edges.ndim != 1 or edges.shape != log_evidences.shape or edges.size == 0:
+            raise ValueError("edges and log_evidences must be 1-d, of the same length")
+        if np.any(np.diff(edges) <= 0) or edges[0] < 1 or edges[-1] > likelihood.number_of_bins:
+            raise ValueError(f"edges must increase, from 1 to {likelihood.number_of_bins}")
+        if not np.all(np.isfinite(log_evidences)):
+            raise ValueError("log_evidences must be finite")
+        self.edges = edges
+        self.log_evidences = log_evidences
+
+    def _project(self, p, plus, cross, arrays):
+        import jax.numpy as jnp
+        from jax.scipy.special import logsumexp
+
+        d_inner_h, h_inner_h = self._bin_inner_products(p, plus, cross, arrays)
+        cumulative = jnp.concatenate([jnp.zeros(1), jnp.cumsum(d_inner_h - h_inner_h / 2)])
+        return logsumexp(cumulative[self.edges] - self.log_evidences)
 
 
 def _batched_bilby_model_classes():

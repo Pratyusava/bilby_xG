@@ -72,3 +72,38 @@ def test_batched_likelihood_matches_numpy(likelihoods):
 def test_batched_likelihood_out_of_range_is_minus_infinity(likelihoods):
     injection, _, batched = likelihoods
     assert batched.log_likelihood_ratio(dict(injection, chi_1=0.9)) == -np.inf
+
+
+def test_truncated_mixture_likelihood(likelihoods):
+    from scipy.special import logsumexp
+
+    from bilby_xG.batched import (BatchedRelativeBinningLikelihood,
+                                  BatchedTruncatedMixtureLikelihood)
+
+    injection, numpy_likelihood, batched = likelihoods
+    n_bins = numpy_likelihood.number_of_bins
+    edges = [n_bins // 4, n_bins // 2, n_bins]
+    log_evidences = [3.0, -1.0, 20.0]
+    mixture = BatchedTruncatedMixtureLikelihood(
+        numpy_likelihood, edges, log_evidences, batch_size=8)
+    rng = np.random.default_rng(2)
+    points = {key: np.full(5, value, dtype=float) for key, value in injection.items()}
+    points["chirp_mass"] *= 1 + 2e-6 * rng.normal(size=5)
+    points["ra"] += 1e-2 * rng.normal(size=5)
+
+    # reference: the data truncated at an edge, by zeroing the summary data
+    # of the bins above it
+    truncated = []
+    for edge in edges:
+        reference = BatchedRelativeBinningLikelihood(numpy_likelihood, batch_size=8)
+        for key in ("a0", "a1", "b0", "b1"):
+            reference._arrays[key] = reference._arrays[key].copy()
+            reference._arrays[key][..., edge:] = 0
+        truncated.append(reference.log_likelihood_ratio(points))
+    truncated = np.array(truncated)
+    np.testing.assert_allclose(truncated[-1], batched.log_likelihood_ratio(points), rtol=1e-12)
+    expected = logsumexp(truncated - np.array(log_evidences)[:, None], axis=0)
+    np.testing.assert_allclose(mixture.log_likelihood_ratio(points), expected,
+                               rtol=1e-10, atol=1e-8)
+    with pytest.raises(ValueError):
+        BatchedTruncatedMixtureLikelihood(numpy_likelihood, [n_bins, n_bins // 2], [0, 0])
