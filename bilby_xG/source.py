@@ -1444,7 +1444,16 @@ def _base_waveform_individual_modes_frequency_sequence(
     phase: float
         The phase at reference frequency or peak amplitude (depends on waveform)
     waveform_kwargs: dict
-        Optional keyword arguments
+        Optional keyword arguments. With ``time_to_merger=True``, each
+        azimuthal-mode entry also has a ``"time_to_merger"`` array, the
+        waveform's own time-frequency map (see
+        :meth:`bilby_xG.interferometer.Interferometer.get_detector_response_for_frequency_dependent_antenna_response`):
+        the time before merger at which mode m emits frequency f is taken as
+        that of the (2,2) mode at 2f/m, t_22(f) = (d arg h_22 / df) / 2 pi,
+        from the aligned-spin (2,2)-only waveform of the same approximant
+        (the in-plane spins set to zero), with a centred finite difference
+        in frequency (so on any frequency grid). The map is zero where that
+        waveform vanishes.
 
     Returns
     -------
@@ -1533,7 +1542,49 @@ def _base_waveform_individual_modes_frequency_sequence(
                 else:
                     raise
 
+    if waveform_kwargs.get('time_to_merger', False):
+        for key in return_dict:
+            return_dict[key]['time_to_merger'] = _lal_time_to_merger(
+                2 * frequencies / int(key), phase, mass_1, mass_2, spin_1z, spin_2z,
+                reference_frequency, luminosity_distance, iota, waveform_dictionary,
+                approximant)
     return return_dict
+
+
+#: relative frequency step of the finite difference for the time-frequency map
+_TIME_TO_MERGER_STEP = 1e-6
+
+
+def _lal_time_to_merger(frequencies, phase, mass_1, mass_2, spin_1z, spin_2z,
+                        reference_frequency, luminosity_distance, iota,
+                        waveform_dictionary, approximant):
+    """(d arg h / df) / 2 pi of the aligned-spin (2,2)-only waveform (SI
+    arguments, as passed to lalsimulation), i.e. the time before merger at
+    which it emits ``frequencies``; zero where the waveform vanishes."""
+    import lal
+    import lalsimulation as lalsim
+
+    mode_array_lal = lalsim.SimInspiralCreateModeArray()
+    for emm in (2, -2):
+        lalsim.SimInspiralModeArrayActivateMode(mode_array_lal, 2, emm)
+    lalsim.SimInspiralWaveformParamsInsertModeArray(waveform_dictionary, mode_array_lal)
+    step = _TIME_TO_MERGER_STEP
+    # some approximants raise when all the frequencies are above the end of
+    # the waveform (as 2 f / m can be, for m = 1): the map is then zero, and
+    # LAL's error messages are silenced
+    debug_level = lal.GetDebugLevel()
+    lal.ClobberDebugLevel(0)
+    try:
+        upper, lower = (lalsim_SimInspiralChooseFDWaveformSequence(
+            phase, mass_1, mass_2, 0.0, 0.0, spin_1z, 0.0, 0.0, spin_2z,
+            reference_frequency, luminosity_distance, iota, waveform_dictionary,
+            approximant, frequencies * (1 + sign * step))[0].data.data for sign in (1, -1))
+    except RuntimeError:
+        return np.zeros(len(frequencies))
+    finally:
+        lal.ClobberDebugLevel(debug_level)
+    # the phase changes by much less than pi over the step
+    return np.angle(upper * np.conj(lower)) / (4 * np.pi * step * frequencies)
 
 
 def sinegaussian(frequency_array, hrss, Q, frequency, **kwargs):
@@ -1803,6 +1854,12 @@ def mlgw_bns_individual_modes(frequency_array, M, q, chi1z, chi2z, LambdaAl2,
     ``coalescence_angle`` is the orbital phase there. The merger is where
     the frequency-domain phase of the (2,2) mode becomes linear, within a
     few ``M`` of the peak of the TEOBResumS amplitude.
+
+    Each mode also carries its own time-frequency map, the time to merger
+    :math:`-t_{\\ell m}(f) = \\partial_f \\phi_{\\ell m} / 2\\pi` (``"time_to_merger"``),
+    which the detector response follows instead of the post-Newtonian
+    estimate (see
+    :meth:`bilby_xG.interferometer.Interferometer.get_detector_response_for_frequency_dependent_antenna_response`).
     """
     from mlgw_bns.batched import mode_polarizations
 
@@ -1814,14 +1871,15 @@ def mlgw_bns_individual_modes(frequency_array, M, q, chi1z, chi2z, LambdaAl2,
                          f"available: {MLGW_BNS_MODES}")
 
     intrinsic = [max(q, 1.0 / q), LambdaAl2, LambdaBl2, chi1z, chi2z]  # q = m1 / m2 >= 1
-    amp, phase = _mlgw_bns_model().predict_modes_amp_phase(
-        intrinsic, M, freqs, modes=modes, distance_mpc=distance)
+    amp, phase, times = _mlgw_bns_model().predict_modes_amp_phase(
+        intrinsic, M, freqs, modes=modes, distance_mpc=distance, return_tf=True)
     if not np.all(np.isfinite(amp)):
         raise ValueError("Parameters outside the range of the mlgw_bns surrogate")
     # pi/2 - phase: the azimuth convention of the TEOBResumS SPA models
     plus, cross = mode_polarizations(amp, phase, modes, inclination,
                                      np.pi / 2.0 - coalescence_angle)
-    return {f"{ell},{emm}": {"plus": plus[0, j], "cross": cross[0, j]}
+    return {f"{ell},{emm}": {"plus": plus[0, j], "cross": cross[0, j],
+                             "time_to_merger": -times[0, j]}
             for j, (ell, emm) in enumerate(modes)}
 
 

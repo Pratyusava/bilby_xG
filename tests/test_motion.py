@@ -238,3 +238,68 @@ def test_uniform_part_is_a_doppler_rescaling():
     assert best(factor) < 1e-6
     assert best(1.0) > 1e-3
     assert best(1 / factor) > 1e-3
+
+
+def test_response_uses_the_waveform_time_to_merger():
+    """A "time_to_merger" entry replaces the 2PN estimate, per mode."""
+    ifo = InterferometerList(["ET_1L_IT"])[0]
+    frequencies = np.geomspace(3.0, 2048.0, 300)
+    parameters = dict(mass_1=1.45, mass_2=1.3, chi_1=0.0, chi_2=0.0, ra=RA, dec=DEC,
+                      psi=PSI, geocent_time=TC, luminosity_distance=40.0)
+    plus = np.ones_like(frequencies, dtype=complex)
+    ttc = calculate_time_to_merger_for_any_mode(frequencies, 1.45, 1.3, mode=2, safety=1)
+    own = 0.9 * ttc
+
+    def response(polarizations, times_to_coalescence=None):
+        if times_to_coalescence is None:
+            return ifo.get_detector_response_for_frequency_dependent_antenna_response(
+                polarizations, parameters, TC - 1000, frequencies)
+        fps, fcs = ifo.frequency_dependent_antenna_response(
+            RA, DEC, TC, PSI, frequencies, TC - 1000, times_to_coalescence)
+        return fps + 1j * fcs
+
+    expected = response(None, own)
+    for polarizations in [{"plus": plus, "cross": 1j * plus, "time_to_merger": own},
+                          {"2,2": {"plus": plus, "cross": 1j * plus, "time_to_merger": own}}]:
+        np.testing.assert_allclose(response(polarizations), expected, rtol=1e-12)
+    np.testing.assert_allclose(response({"plus": plus, "cross": 1j * plus}),
+                               response(None, ttc), rtol=1e-12)
+    # the same shared cache serves modes with the same m and different maps
+    shared = {}
+    both = ifo.get_detector_response_for_frequency_dependent_antenna_response(
+        {"2,2": {"plus": plus, "cross": 1j * plus, "time_to_merger": own},
+         "3,2": {"plus": plus, "cross": 1j * plus, "time_to_merger": ttc}},
+        parameters, TC - 1000, frequencies, shared=shared)
+    np.testing.assert_allclose(both, expected + response(None, ttc), rtol=1e-12)
+
+
+def test_uniform_part_is_a_doppler_rescaling_with_the_waveform_time():
+    """With the waveform's own time-frequency map (mlgw_bns, referred to the
+    merger), the orbital motion of the detector is a Doppler rescaling of the
+    masses and distance up to the curvature of the orbit: tiny above 30 Hz.
+    The 2PN map, referred to the point-particle coalescence, is not."""
+    pytest.importorskip("mlgw_bns")
+    from bilby_xG.source import convert_to_mlgw_bns_parameters, mlgw_bns_individual_modes
+
+    ifo = InterferometerList(["ET_1L_IT"])[0]
+    frequencies = np.geomspace(30.0, 1000.0, 10_000)
+    ra, dec, tc = 1.0, 0.5, TC + 1e7
+    factor = doppler_factor(ra, dec, tc)
+
+    def strain(scale, orbital_motion, own_time=True):
+        parameters, _ = convert_to_mlgw_bns_parameters(dict(
+            chirp_mass=1.2 * scale, mass_ratio=0.9, chi_1=0.0, chi_2=0.0, lambda_1=400.0,
+            lambda_2=600.0, luminosity_distance=40.0 * scale, theta_jn=0.5, phase=0.3,
+            ra=ra, dec=dec, psi=0.3, geocent_time=tc))
+        pols = mlgw_bns_individual_modes(frequencies, **parameters, mode_array=[[2, 2]])
+        if not own_time:
+            del pols["2,2"]["time_to_merger"]
+        return ifo.get_detector_response_for_frequency_dependent_antenna_response(
+            pols, parameters, tc, frequencies, orbital_motion=orbital_motion)
+
+    def residual(own_time):
+        ratio = strain(1.0, True, own_time) / strain(factor, False, own_time)
+        return np.max(np.abs(np.log(ratio)))
+
+    assert residual(True) < 1e-4
+    assert residual(False) > 3e-4

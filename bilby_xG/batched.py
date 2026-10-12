@@ -37,7 +37,6 @@ from bilby.core.utils import logger, speed_of_light
 from bilby_cython.geometry import greenwich_mean_sidereal_time
 
 from .motion import default_ephemeris, hermite_interpolate, precession_matrix, resolve_center
-from .utils import calculate_time_to_merger_for_any_mode
 
 __author__ = ["Jacopo Tissino"]
 
@@ -48,7 +47,8 @@ def mlgw_bns_jax_modes(model, mode_array):
     """A JAX function evaluating selected mlgw_bns modes for a batch.
 
     Returns ``modes(theta, total_mass, distance, inclination, phase,
-    frequencies) -> (plus, cross)``, each of shape ``(n, n_modes, n_freqs)``,
+    frequencies) -> (plus, cross, time_to_merger)``, each of shape
+    ``(n, n_modes, n_freqs)``,
     with ``theta`` of shape ``(n, 5)``, rows ``[q >= 1, lambda_1, lambda_2,
     chi_1, chi_2]``, and the other parameters of shape ``(n,)``: the same
     per-mode polarisations as :func:`bilby_xG.source.mlgw_bns_individual_modes`
@@ -58,13 +58,14 @@ def mlgw_bns_jax_modes(model, mode_array):
     import jax.numpy as jnp
     from mlgw_bns.batched import mode_polarizations
 
-    predict = model.jax_modes_amp_phase(mode_array)
+    predict = model.jax_modes_amp_phase(mode_array, return_tf=True)
 
     def modes(theta, total_mass, distance, inclination, phase, frequencies):
-        amp, phi = predict(theta, total_mass, frequencies, distance)
+        amp, phi, times = predict(theta, total_mass, frequencies, distance)
         # pi/2 - phase: the azimuth convention of the TEOBResumS SPA models
-        return mode_polarizations(amp, phi, mode_array, inclination,
-                                  jnp.pi / 2 - phase, xp=jnp)
+        plus, cross = mode_polarizations(amp, phi, mode_array, inclination,
+                                         jnp.pi / 2 - phase, xp=jnp)
+        return plus, cross, -times
 
     return modes
 
@@ -239,14 +240,17 @@ class BatchedRelativeBinningLikelihood(Likelihood):
         import jax.numpy as jnp
 
         theta = jnp.stack([p["q"], p["lambda_1"], p["lambda_2"], p["chi_1"], p["chi_2"]], axis=1)
-        plus, cross = self._modes(theta, p["total_mass"], p["distance"], p["inclination"],
-                                  p["phase"], arrays["frequencies"])
-        ln_l = jax.vmap(self._project, in_axes=(0, 0, 0, None))(p, plus, cross, arrays)
+        plus, cross, time_to_merger = self._modes(
+            theta, p["total_mass"], p["distance"], p["inclination"], p["phase"],
+            arrays["frequencies"])
+        ln_l = jax.vmap(self._project, in_axes=(0, 0, 0, 0, None))(
+            p, plus, cross, time_to_merger, arrays)
         # outside the surrogate's range: outside the support
         return jnp.where(jnp.isnan(ln_l), -jnp.inf, ln_l)
 
-    def _project(self, p, plus, cross, arrays):
-        """ln L ratio for one parameter set, given its modes ``(n_modes, n_freqs)``."""
+    def _project(self, p, plus, cross, time_to_merger, arrays):
+        """ln L ratio for one parameter set, given its modes and their times to
+        merger ``(n_modes, n_freqs)``."""
         import jax.numpy as jnp
 
         d_inner_h, h_inner_h = self._bin_inner_products(p, plus, cross, arrays)
@@ -265,13 +269,12 @@ class BatchedRelativeBinningLikelihood(Likelihood):
         ratios = []
         for geometry in self._geometries:
             strains = []
-            for k, (_, emm) in enumerate(self.mode_array):
-                if emm not in frames:
-                    ttc = calculate_time_to_merger_for_any_mode(
-                        f, p["mass_1"], p["mass_2"], p["chi_1"], p["chi_2"], mode=emm, safety=1)
+            for k, _ in enumerate(self.mode_array):
+                if k not in frames:
+                    ttc = time_to_merger[k]
                     gmsts = (p["gmst"] - p["gmst_rate"] * ttc if earth_rotation
                              else jnp.full_like(f, p["gmst"]))
-                    frames[emm] = (_wave_frame(p["ra"], p["dec"], p["psi"], gmsts),
+                    frames[k] = (_wave_frame(p["ra"], p["dec"], p["psi"], gmsts),
                                    _geocentre_delay(
                                        p["ra"], p["dec"], p["geocent_time"], p["gmst"], ttc,
                                        dict(arrays["orbit"], step=self._orbit_step),
@@ -279,8 +282,8 @@ class BatchedRelativeBinningLikelihood(Likelihood):
                 direction = jnp.stack([
                     jnp.cos(p["dec"]) * jnp.cos(p["ra"] - p["gmst"]),
                     jnp.cos(p["dec"]) * jnp.sin(p["ra"] - p["gmst"]), jnp.sin(p["dec"])])
-                fps, fcs = _antenna_response(geometry, frames[emm][0], f, ifo_time, self._flags,
-                                             frames[emm][1], direction)
+                fps, fcs = _antenna_response(geometry, frames[k][0], f, ifo_time, self._flags,
+                                             frames[k][1], direction)
                 strains.append(plus[k] * fps + cross[k] * fcs)
             ratios.append(jnp.stack(strains))
         ratio = jnp.stack(ratios) / arrays["reference"]  # (ifo, mode, edge)

@@ -35,6 +35,11 @@ from .utils import calculate_time_to_merger_for_any_mode
 __author__ = ["Pratyusava Baral <pbaral@uwm.edu>", "Soichiro Morisaki"]
 
 
+#: Optional entry of a polarisation dict: the waveform's own time to merger
+#: (seconds) at each frequency, used instead of the post-Newtonian estimate.
+TIME_TO_MERGER_KEY = "time_to_merger"
+
+
 def _mode_integer(mode_key):
     """Parse a waveform-mode dict key into an integer azimuthal number ``m``.
 
@@ -435,7 +440,20 @@ class Interferometer(_Interferometer):
         Handles both the standard ``{"plus": ..., "cross": ...}`` polarisation
         dict and the per-mode nested dict
         ``{mode_key: {"plus": ..., "cross": ...}}`` produced by the
-        individual-mode source models. The propagation model is selected from
+        individual-mode source models.
+
+        The response follows the time :math:`\\tau(f)` before merger at
+        which each frequency is emitted. A source model can supply its own
+        time-frequency map as an extra entry ``"time_to_merger"`` (seconds,
+        per frequency, alongside ``"plus"`` and ``"cross"``, for each mode);
+        otherwise the 2PN point-particle estimate of
+        :func:`bilby_xG.utils.calculate_time_to_merger_for_any_mode` is used.
+        The waveform's own map is consistent with its time reference
+        (``geocent_time`` is the arrival time of the merger, for instance,
+        for :func:`bilby_xG.source.mlgw_bns_individual_modes`), which the
+        2PN one, referred to the point-particle coalescence, is not.
+
+        The propagation model is selected from
         ``parameters`` via :func:`bilby_xG.propagation.build_propagation`, so
         a sampled ``vG`` or ``(a, A)`` automatically enables the corresponding
         beyond-GR physics, while their absence recovers general relativity.
@@ -443,7 +461,8 @@ class Interferometer(_Interferometer):
         ``shared``, if given, is a dict in which the detector-independent
         part of the response (time to coalescence, propagation phase and
         :func:`compute_wave_frame` and :func:`bilby_xG.motion.geocentre_delay`,
-        per azimuthal mode number) is stored, and reused by later calls for
+        per azimuthal mode number, or per mode with a ``"time_to_merger"``)
+        is stored, and reused by later calls for
         other detectors. The caller must pass a fresh dict whenever
         ``parameters``, ``frequencies``, ``center`` or the Earth-rotation/
         orbital-motion options change.
@@ -465,12 +484,17 @@ class Interferometer(_Interferometer):
             shared = {}
         earth_rotation = earth_rotation_time_delay or earth_rotation_beam_patterns
 
-        def response(mode, polarizations):
-            if mode not in shared:
-                times_to_coalescence = calculate_time_to_merger_for_any_mode(
-                    frequencies, parameters['mass_1'], parameters['mass_2'],
-                    parameters['chi_1'], parameters['chi_2'], mode=mode, safety=1)
-                shared[mode] = (
+        def response(mode_key, mode, polarizations):
+            times_to_coalescence = polarizations.get(TIME_TO_MERGER_KEY)
+            # the waveform's own time-frequency map is specific to its (l, m)
+            # mode, the post-Newtonian one only depends on m
+            cache_key = mode if times_to_coalescence is None else mode_key
+            if cache_key not in shared:
+                if times_to_coalescence is None:
+                    times_to_coalescence = calculate_time_to_merger_for_any_mode(
+                        frequencies, parameters['mass_1'], parameters['mass_2'],
+                        parameters['chi_1'], parameters['chi_2'], mode=mode, safety=1)
+                shared[cache_key] = (
                     times_to_coalescence,
                     np.exp(1j * propagation.propagation_phase(frequencies, mode=mode)),
                     compute_wave_frame(
@@ -482,7 +506,7 @@ class Interferometer(_Interferometer):
                         parameters['ra'], parameters['dec'],
                         parameters['geocent_time'], times_to_coalescence,
                         center=center, orbital_motion=orbital_motion))
-            times_to_coalescence, correction_factor, frame, geocentre_delay = shared[mode]
+            times_to_coalescence, correction_factor, frame, geocentre_delay = shared[cache_key]
             fps, fcs = self.frequency_dependent_antenna_response(
                 parameters['ra'], parameters['dec'], parameters['geocent_time'],
                 parameters['psi'],
@@ -502,10 +526,11 @@ class Interferometer(_Interferometer):
                 polarizations['plus'] * fps + polarizations['cross'] * fcs)
 
         if 'plus' in waveform_polarizations.keys():
-            return response(2, waveform_polarizations)
+            return response('plus', 2, waveform_polarizations)
         signal_ifo = np.zeros(len(frequencies), dtype=complex)
         for mode_key in waveform_polarizations.keys():
-            signal_ifo += response(_mode_integer(mode_key), waveform_polarizations[mode_key])
+            signal_ifo += response(
+                mode_key, _mode_integer(mode_key), waveform_polarizations[mode_key])
         return signal_ifo
 
     def time_delay_from_geocenter(self, ra, dec, time, vG=1):

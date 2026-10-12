@@ -88,3 +88,24 @@ def test_teobresums_spa_modes():
     # SPA amplitude of the (2,2) inspiral falls as f^(-7/6)
     slope = np.polyfit(np.log(freqs[:50]), np.log(h22[:50]), 1)[0]
     assert slope == pytest.approx(-7 / 6, abs=0.05)
+
+
+def test_mlgw_bns_time_to_merger():
+    """Each mode carries -t(f) = phi'(f) / 2 pi, close to the 2PN estimate
+    early in the inspiral."""
+    pytest.importorskip("mlgw_bns")
+    from bilby_xG.source import convert_to_mlgw_bns_parameters, mlgw_bns_individual_modes
+    from bilby_xG.utils import calculate_time_to_merger_for_any_mode
+
+    params, _ = convert_to_mlgw_bns_parameters(dict(PARAMETERS))
+    freqs = np.linspace(40.0, 40.1, 1001)
+    modes = mlgw_bns_individual_modes(freqs, **{key: params[key] for key in SOURCE_KEYS})
+    for key, pols in modes.items():
+        emm = int(key.split(",")[1])
+        phase = np.unwrap(np.angle(pols["plus"] - 1j * pols["cross"]))
+        np.testing.assert_allclose(pols["time_to_merger"][1:-1],
+                                   np.gradient(phase, freqs)[1:-1] / (2 * np.pi), rtol=1e-6)
+        post_newtonian = calculate_time_to_merger_for_any_mode(
+            freqs, params["mass_1"], params["mass_2"], params["chi1z"], params["chi2z"],
+            mode=emm, safety=1)
+        np.testing.assert_allclose(pols["time_to_merger"], post_newtonian, rtol=1e-2)
