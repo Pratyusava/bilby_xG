@@ -914,6 +914,25 @@ def lal_binary_neutron_star_relative_binning(
             phi_12=phi_12, lambda_1=lambda_1, lambda_2=lambda_2, **waveform_kwargs)
 
 
+def lal_binary_neutron_star_relative_binning_individual_modes(
+        frequency_array, mass_1, mass_2, luminosity_distance, a_1, tilt_1,
+        phi_12, a_2, tilt_2, phi_jl, lambda_1, lambda_2, theta_jn, phase,
+        fiducial, **kwargs):
+    """:func:`lal_binary_neutron_star_relative_binning` for the mode-by-mode
+    relative-binning likelihood, for an approximant without a mode
+    decomposition (IMRPhenomPv2_NRTidal): its whole polarisations, keyed as
+    the ``"2,2"`` mode, so the detector response takes the 22 mode's time to
+    merger. ``mode_array`` must be ``[[2, 2]]``."""
+    mode_array = kwargs.pop("mode_array", [[2, 2]])
+    if [list(mode) for mode in mode_array] != [[2, 2]]:
+        raise ValueError(f"{kwargs.get('waveform_approximant')} has no modes: "
+                         f"mode_array must be [[2, 2]], not {mode_array}")
+    return {"2,2": lal_binary_neutron_star_relative_binning(
+        frequency_array, mass_1, mass_2, luminosity_distance, a_1, tilt_1,
+        phi_12, a_2, tilt_2, phi_jl, lambda_1, lambda_2, theta_jn, phase,
+        fiducial, **kwargs)}
+
+
 def _base_roq_waveform(
         frequency_array, mass_1, mass_2, luminosity_distance, a_1, tilt_1,
         phi_12, a_2, tilt_2, lambda_1, lambda_2, phi_jl, theta_jn, phase,

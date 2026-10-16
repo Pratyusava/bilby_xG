@@ -228,3 +228,29 @@ def test_mlgw_bns_time_to_merger():
             freqs, params["mass_1"], params["mass_2"], params["chi1z"], params["chi2z"],
             mode=emm, safety=1)
         np.testing.assert_allclose(pols["time_to_merger"], post_newtonian, rtol=1e-2)
+
+
+def test_lal_bns_relative_binning_individual_modes_is_the_whole_waveform():
+    """A mode-less approximant (IMRPhenomPv2_NRTidal) comes back whole, as the
+    22 mode, on the bin edges and on the full grid."""
+    pytest.importorskip("lalsimulation")
+    from bilby_xG.source import (lal_binary_neutron_star_relative_binning,
+                                 lal_binary_neutron_star_relative_binning_individual_modes)
+
+    parameters = dict(mass_1=1.4, mass_2=1.3, luminosity_distance=100.0, a_1=0.03,
+                      tilt_1=1.0, phi_12=0.5, a_2=0.02, tilt_2=2.0, phi_jl=1.0,
+                      lambda_1=400.0, lambda_2=600.0, theta_jn=0.5, phase=1.0)
+    frequencies = np.arange(20.0, 512.0, 0.5)
+    kwargs = dict(waveform_approximant="IMRPhenomPv2_NRTidal", minimum_frequency=20.0,
+                  reference_frequency=20.0, frequency_bin_edges=frequencies[::50])
+    for fiducial in (0, 1):
+        modes = lal_binary_neutron_star_relative_binning_individual_modes(
+            frequencies, **parameters, fiducial=fiducial, mode_array=[[2, 2]], **kwargs)
+        whole = lal_binary_neutron_star_relative_binning(
+            frequencies, **parameters, fiducial=fiducial, **kwargs)
+        assert list(modes) == ["2,2"]
+        for key in ("plus", "cross"):
+            np.testing.assert_array_equal(modes["2,2"][key], whole[key])
+    with pytest.raises(ValueError):
+        lal_binary_neutron_star_relative_binning_individual_modes(
+            frequencies, **parameters, fiducial=0, mode_array=[[2, 2], [3, 3]], **kwargs)
