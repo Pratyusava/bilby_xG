@@ -158,6 +158,27 @@ def test_batched_precessing_likelihood_out_of_range_is_minus_infinity(precessing
     assert batched.log_likelihood_ratio(dict(injection, a_1=0.9, tilt_1=0.0)) == -np.inf
 
 
+def _exact_log_likelihood_ratio(likelihood, interferometer, converted, f_lo, f_hi):
+    """ln L ratio summed exactly over the data grid in [f_lo, f_hi]."""
+    from bilby.gw.utils import noise_weighted_inner_product
+
+    frequencies = interferometer.frequency_array[interferometer.frequency_mask]
+    lo, hi = np.searchsorted(frequencies, [f_lo, f_hi])
+    frequencies = frequencies[lo:hi]
+    if likelihood.injection is not None:
+        strain = likelihood.injection.signal(interferometer, frequencies)
+    else:
+        offset = int(np.argmax(interferometer.frequency_mask))
+        strain = interferometer.strain_data._frequency_domain_strain[offset + lo:offset + hi]
+    psd = (interferometer.power_spectral_density.get_power_spectral_density_array(frequencies)
+           * interferometer._window_power_correction)
+    h = sum(likelihood._project_fiducial_mode(interferometer, converted, f"{ell},{emm}", frequencies)
+            for ell, emm in likelihood.mode_array)
+    duration = interferometer.duration
+    return (np.real(noise_weighted_inner_product(h, strain, psd, duration))
+            - 0.5 * np.real(noise_weighted_inner_product(h, h, psd, duration)))
+
+
 def test_split_scheme(precessing_likelihoods, split_likelihoods):
     """Scheme 1 (``precessing_scheme="split"``) agrees with scheme 2 and with
     the exact likelihood, and the batched version with the numpy one."""
@@ -174,8 +195,9 @@ def test_split_scheme(precessing_likelihoods, split_likelihoods):
         sample = dict(sample, fiducial=1)
         sample.update(split_likelihood.get_sky_frame_parameters(parameters=sample))
         converted, _ = split_likelihood.waveform_generator.parameter_conversion(sample)
-        exact.append(sum(split_likelihood._accumulate_bin_sums(
-            ifo, converted, split_likelihood.bin_freqs[0], split_likelihood.bin_freqs[-1])[0]
+        exact.append(sum(_exact_log_likelihood_ratio(
+            split_likelihood, ifo, converted, split_likelihood.bin_freqs[0],
+            split_likelihood.bin_freqs[-1])
             for ifo in split_likelihood.interferometers))
     np.testing.assert_allclose(ratio, exact, atol=0.1)
     np.testing.assert_allclose(split, exact, atol=0.1)

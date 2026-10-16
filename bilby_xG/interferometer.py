@@ -164,65 +164,6 @@ class Interferometer(_Interferometer):
         integrand = np.conj(s) * s / psd
         return 4 / self.strain_data.duration * np.sum(integrand) * stride
 
-    def plot_data(self, signal=None, outdir='.', label=None, n_points=2000):
-        """Memory-safe characteristic-strain frequency-domain data plot.
-
-        The upstream implementation
-        (``bilby.gw.detector.interferometer.Interferometer.plot_data``)
-        computes the full-band ASD array and calls ``loglog`` on every
-        in-band frequency bin -- at low ``minimum_frequency`` (e.g. 3Hz on
-        ET) that is O(1e8) points, each contributing array several GB, plus
-        matplotlib's own vertex-buffer allocation for that many points. This
-        is the dominant remaining memory cost once
-        :meth:`optimal_snr_squared` is fixed the same way (observed: several
-        GB retained after the SNR lines print, on the injected-strain plot
-        call immediately after). Since the plot is log-log, a geometric
-        (log-spaced) subsample of ``n_points`` in-band frequencies loses no
-        visible structure while only ever touching O(n_points)-sized arrays
-        -- the PSD is queried directly at those frequencies rather than via
-        the cached full-band ``amplitude_spectral_density_array`` property,
-        so no full-size array is built just to be subsampled.
-
-        Also plots characteristic strain rather than raw ASD: ``2 f |h(f)|``
-        for the (injected) signal and ``sqrt(f) * ASD(f) = sqrt(f S(f))``
-        for the noise floor -- the standard convention that puts both on a
-        directly comparable, frequency-weighted scale.
-        """
-        import matplotlib.pyplot as plt
-        from bilby.core import utils as core_utils
-        if core_utils.command_line_args.bilby_test_mode:
-            return
-
-        mask = self.strain_data.frequency_mask
-        idxs = np.flatnonzero(mask)
-        f_full = self.strain_data.frequency_array
-        f_geom = np.geomspace(f_full[idxs[0]], f_full[idxs[-1]], min(n_points, idxs.size))
-        sel = np.unique(idxs[np.searchsorted(f_full[idxs], f_geom)])
-
-        f_plot = f_full[sel]
-        strain_hc = 2 * f_plot * np.abs(self.strain_data.frequency_domain_strain[sel])
-        psd = (self.power_spectral_density.get_power_spectral_density_array(
-            frequency_array=f_plot) * self._window_power_correction)
-        asd_hc = np.sqrt(f_plot * psd)
-
-        fig, ax = plt.subplots()
-        ax.loglog(f_plot, strain_hc, color='C0', label=self.name)
-        ax.loglog(f_plot, asd_hc, color='C1', lw=1.0, label=self.name + ' ASD')
-        if signal is not None:
-            signal_hc = 2 * f_plot * np.abs(signal[sel])
-            ax.loglog(f_plot, signal_hc, color='C2', label='Signal')
-        ax.grid(True)
-        ax.set_ylabel(r'Characteristic strain $h_c(f)$')
-        ax.set_xlabel(r'Frequency [Hz]')
-        ax.legend(loc='best')
-        fig.tight_layout()
-        if label is None:
-            fig.savefig('{}/{}_frequency_domain_data.png'.format(outdir, self.name))
-        else:
-            fig.savefig('{}/{}_{}_frequency_domain_data.png'.format(
-                outdir, self.name, label))
-        plt.close(fig)
-
     def offload_frequency_domain_strain(self, cache_dir):
         """Move the full-band frequency-domain strain to a disk-backed array.
 

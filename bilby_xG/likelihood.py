@@ -29,7 +29,6 @@ Provides:
 """
 import inspect
 import tempfile
-import time
 
 import numpy as np
 from scipy.optimize import differential_evolution
@@ -695,35 +694,12 @@ class RelativeBinningGravitationalWaveTransientNextGenerationModebyMode(Gravitat
     epsilon: float, optional
         Tunable parameter which limits the differential phase change in each
         bin when setting up the bin range. See https://arxiv.org/abs/1806.08792.
-    bin_selection_test_parameters: dict, optional
-        If given, frequency bins are instead chosen by the adaptive
-        mode-by-mode relative-binning bin-selection algorithm (Algorithm 1
-        of Leslie, Dai & Pratten 2021, https://arxiv.org/abs/2109.09872),
-        using this parameter set (which should differ from
-        ``fiducial_parameters`` -- e.g. another sample from the region of
-        parameter space favoured by the data) to probe the accuracy of
-        candidate bins. This adapts the bin placement to the signal under
-        analysis and typically needs far fewer bins than ``chi``/``epsilon``
-        for comparable accuracy. If not given, bins follow the closed-form
-        ``chi``/``epsilon`` prescription instead.
-    bin_selection_eta: float, optional
-        Only used when ``bin_selection_test_parameters`` is given. Target
-        total absolute error in the log-likelihood ratio from mode-by-mode
-        relative binning, evaluated at the test parameters. The paper finds
-        0.1 is small enough not to noticeably affect the posterior. Default
-        0.1.
-    bin_selection_target_number_of_bins: int, optional
-        Only used when ``bin_selection_test_parameters`` is given. Initial
-        guess for the number of bins, used to set the per-bin error budget
-        ``bin_selection_eta / target_number_of_bins`` before the algorithm's
-        outer loop converges on the actual number of bins needed. Default
-        200, as in the paper.
     bin_freqs: array_like, optional
         Precomputed bin-edge frequencies, e.g. from
         :func:`bilby_xG.bin_selection.select_relative_binning_bins`. They are
         snapped to the data's frequency grid and clipped to the band, whose
         edges are always included. Takes precedence over
-        ``bin_selection_test_parameters`` and ``chi``/``epsilon``.
+        ``chi``/``epsilon``.
     injection: bilby_xG.injection.SummaryDataInjection, optional
         Simulated data: the summary data are built from this injection's
         signal and a Gaussian-noise draw (or zero noise), and the
@@ -780,9 +756,6 @@ class RelativeBinningGravitationalWaveTransientNextGenerationModebyMode(Gravitat
                  mode_array=[[2, 2], [3, 3], [4, 4], [2, 1], [3, 2]],  # FIXME
                  chi=1,
                  epsilon=0.5,
-                 bin_selection_test_parameters=None,
-                 bin_selection_eta=0.1,
-                 bin_selection_target_number_of_bins=200,
                  bin_freqs=None,
                  earth_rotation_time_delay=True,
                  earth_rotation_beam_patterns=True,
@@ -844,9 +817,6 @@ class RelativeBinningGravitationalWaveTransientNextGenerationModebyMode(Gravitat
         self.chi = chi
         self.epsilon = epsilon
         self.gamma = np.array([-5 / 3, -2 / 3, 1, 5 / 3, 7 / 3])
-        self.bin_selection_test_parameters = bin_selection_test_parameters
-        self.bin_selection_eta = bin_selection_eta
-        self.bin_selection_target_number_of_bins = bin_selection_target_number_of_bins
         self.precomputed_bin_freqs = None if bin_freqs is None else np.asarray(bin_freqs)
         self.maximum_frequency = waveform_generator.frequency_array[-1]
         self.fiducial_waveform_obtained = False
@@ -913,18 +883,7 @@ class RelativeBinningGravitationalWaveTransientNextGenerationModebyMode(Gravitat
         """
         Setup the frequency bins.
 
-        If ``self.bin_selection_test_parameters`` is set, bins are instead
-        chosen adaptively by the mode-by-mode relative-binning bin-selection
-        algorithm (Algorithm 1 of Leslie, Dai & Pratten 2021,
-        https://arxiv.org/abs/2109.09872, "GETBINS"/"BISECTBINSEARCH"): the
-        full frequency range is recursively bisected, starting as a single
-        candidate bin, until every candidate bin's contribution to the
-        log-likelihood-ratio error (this class's own mode-by-mode
-        relative-binning approximation compared to the exact per-frequency
-        sum, both evaluated at the test parameters) falls below a shrinking
-        per-bin budget. See :meth:`mode_by_mode_bin_freqs`.
-
-        Otherwise, bins follow the closed-form post-Newtonian-phase
+        Unless precomputed bin edges were given, bins follow the closed-form post-Newtonian-phase
         prescription of https://arxiv.org/abs/1806.08792. If :code:`epsilon`
         is too small, the naive bins can be smaller than the frequency
         spacing of the data. We require that bins are at least as wide as
@@ -959,13 +918,6 @@ class RelativeBinningGravitationalWaveTransientNextGenerationModebyMode(Gravitat
             bin_freqs = ref_freqs[indices]
             selection_description = (
                 f"precomputed, {len(self.precomputed_bin_freqs) - 1} bins given")
-        elif self.bin_selection_test_parameters is not None:
-            bin_freqs = self.mode_by_mode_bin_freqs(
-                self.bin_selection_test_parameters, frequency_array,
-                minimum_frequency, maximum_frequency)
-            selection_description = (
-                f"mode-by-mode adaptive bin selection, eta="
-                f"{self.bin_selection_eta}")
         else:
             bin_freqs = relative_binning_bin_freqs(
                 frequency_array, minimum_frequency, maximum_frequency,
@@ -996,215 +948,6 @@ class RelativeBinningGravitationalWaveTransientNextGenerationModebyMode(Gravitat
                 mode_key = f"{mode[0]},{mode[1]}"
                 self.per_detector_per_mode_fiducial_waveform_points[name][mode_key] = \
                     self._reference_mode(interferometer, mode_key, self.bin_freqs)
-
-    def mode_by_mode_bin_freqs(self, test_parameters, frequency_array,
-                                minimum_frequency, maximum_frequency):
-        """Adaptive frequency bin edges for mode-by-mode relative binning.
-
-        Implements the bin-selection algorithm (Algorithm 1, "GETBINS") of
-        Leslie, Dai & Pratten 2021, https://arxiv.org/abs/2109.09872: starting
-        from the full ``[minimum_frequency, maximum_frequency]`` range as a
-        single candidate bin, :meth:`_bisect_bin_search` recursively bisects
-        candidate bins until each one's log-likelihood-ratio error is below
-        ``self.bin_selection_eta / target_number_of_bins``. The resulting
-        number of bins is then fed back in as the new target and the process
-        repeated until it converges (the number of bins produced equals the
-        number assumed to set the per-bin error budget).
-
-        Parameters
-        ----------
-        test_parameters: dict
-            A representative parameter set (e.g. another posterior sample,
-            distinct from ``self.fiducial_parameters``) used to probe the
-            error of candidate bins. The paper finds the choice of bins is
-            not very sensitive to which sample is used.
-        frequency_array: ndarray
-            The candidate frequency grid to choose bin edges from (a subset
-            of it is returned).
-        minimum_frequency, maximum_frequency: float
-            The frequency range to cover with bins.
-
-        Returns
-        -------
-        bin_freqs: ndarray
-            The bin-edge frequencies (``len(bin_freqs) - 1`` bins).
-        """
-        test_parameters = test_parameters.copy()
-        test_parameters["fiducial"] = 1
-        test_parameters.update(self.get_sky_frame_parameters(parameters=test_parameters))
-        test_converted_parameters, _ = self.waveform_generator.parameter_conversion(test_parameters)
-
-        ref_freqs = frequency_array[
-            (frequency_array >= minimum_frequency) & (frequency_array <= maximum_frequency)]
-
-        eta = self.bin_selection_eta
-        target_number_of_bins = self.bin_selection_target_number_of_bins
-        indices = [0, len(ref_freqs) - 1]
-        previous_number_of_bins = None
-        iterations = 0
-        while previous_number_of_bins != target_number_of_bins and iterations < 50:
-            target_bin_error = eta / target_number_of_bins
-            self._bisect_bin_search_calls = 0
-            self._bisect_bin_search_last_log = time.time()
-            indices = self._bisect_bin_search(
-                test_converted_parameters, ref_freqs, 0, len(ref_freqs) - 1, target_bin_error)
-            previous_number_of_bins = target_number_of_bins
-            target_number_of_bins = len(indices) - 1
-            iterations += 1
-            logger.info(
-                f"Mode-by-mode bin selection: iteration {iterations}, "
-                f"{target_number_of_bins} bins (target log-likelihood "
-                f"error {eta}, {eta / previous_number_of_bins:.3g} per bin).")
-
-        return ref_freqs[indices]
-
-    def _bisect_bin_search(self, test_converted_parameters, ref_freqs, lo, hi, target_bin_error):
-        """"BISECTBINSEARCH" (Algorithm 1 of arXiv:2109.09872): recursively
-        bisect the candidate bin spanning ``ref_freqs[lo:hi+1]`` until its
-        log-likelihood-ratio error is within ``target_bin_error``, or it
-        cannot be split further (it already spans a single frequency sample).
-        Returns the list of ``ref_freqs`` indices bounding the resulting
-        (possibly many) bins, e.g. ``[lo, m1, m2, hi]``.
-        """
-        if hi - lo <= 1:
-            return [lo, hi]
-        error = self._log_likelihood_error_for_candidate_bin(
-            test_converted_parameters, ref_freqs[lo], ref_freqs[hi])
-        self._bisect_bin_search_calls += 1
-        now = time.time()
-        if now - self._bisect_bin_search_last_log > 5:
-            self._bisect_bin_search_last_log = now
-            logger.info(
-                f"Mode-by-mode bin selection: {self._bisect_bin_search_calls} "
-                f"candidate bins evaluated so far, current candidate "
-                f"[{ref_freqs[lo]:.3g}, {ref_freqs[hi]:.3g}] Hz, error={error:.3g} "
-                f"(target {target_bin_error:.3g}).")
-        if error <= target_bin_error:
-            return [lo, hi]
-        mid = (lo + hi) // 2
-        left = self._bisect_bin_search(test_converted_parameters, ref_freqs, lo, mid, target_bin_error)
-        right = self._bisect_bin_search(test_converted_parameters, ref_freqs, mid, hi, target_bin_error)
-        return left[:-1] + right
-
-    def _log_likelihood_error_for_candidate_bin(self, test_converted_parameters, f_lo, f_hi):
-        """Absolute error in the log-likelihood-ratio contribution from the
-        candidate frequency bin ``[f_lo, f_hi]``, summed over interferometers:
-        the exact per-frequency sum (both evaluated at
-        ``test_converted_parameters``) minus this class's own mode-by-mode
-        relative-binning approximation for that single bin (a linear
-        interpolant using only the two bin edges). This is the
-        "LOGLIKELIHOODERROR" primitive of Algorithm 1 in
-        https://arxiv.org/abs/2109.09872.
-        """
-        total_exact = 0.0
-        total_approx = 0.0
-        for interferometer in self.interferometers:
-            result = self._accumulate_bin_sums(interferometer, test_converted_parameters, f_lo, f_hi)
-            if result is None:
-                continue
-            exact_ll, approx_ll = result
-            total_exact += exact_ll
-            total_approx += approx_ll
-        return abs(total_exact - total_approx)
-
-    def _accumulate_bin_sums(self, interferometer, test_converted_parameters, f_lo, f_hi):
-        """Exact and mode-by-mode-relative-binning-approximated
-        log-likelihood-ratio contributions from one candidate bin, on one
-        interferometer, used by :meth:`_log_likelihood_error_for_candidate_bin`.
-
-        The full-resolution fiducial and test-parameter mode waveforms
-        needed for the exact sum are evaluated in chunks of
-        ``self.summary_data_chunk_size`` samples (mirroring
-        :meth:`compute_summary_data`), so they are never held in memory at
-        once; the linear approximation only needs two edge evaluations per
-        mode, done once outside the chunk loop.
-
-        Returns ``None`` if the candidate bin is empty for this
-        interferometer (its edges fall between two consecutive samples),
-        otherwise ``(exact_log_likelihood, approximate_log_likelihood)``.
-        """
-        full_frequencies = interferometer.frequency_array
-        mask = interferometer.frequency_mask
-        masked_frequency_array = full_frequencies[mask]
-        lo_idx, hi_idx = np.searchsorted(masked_frequency_array, [f_lo, f_hi])
-        if hi_idx <= lo_idx:
-            return None
-
-        raw_offset = int(np.argmax(mask))
-        # an injection as summary data: the bins are chosen on its noiseless signal
-        raw_strain = (None if self.injection is not None
-                      else interferometer.strain_data._frequency_domain_strain)
-        psd_model = interferometer.power_spectral_density
-        window_power_correction = interferometer._window_power_correction
-        duration = interferometer.duration
-        central_frequency = (f_lo + f_hi) / 2
-        mode_keys = [f"{ell},{emm}" for ell, emm in self.mode_array]
-
-        a0 = {key: 0j for key in mode_keys}
-        a1 = {key: 0j for key in mode_keys}
-        b0 = {key: {keyp: 0j for keyp in mode_keys} for key in mode_keys}
-        b1 = {key: {keyp: 0j for keyp in mode_keys} for key in mode_keys}
-        exact_dh = 0j
-        exact_hh = 0j
-
-        for chunk_lo in range(lo_idx, hi_idx, self.summary_data_chunk_size):
-            chunk_hi = min(chunk_lo + self.summary_data_chunk_size, hi_idx)
-            chunk_frequencies = masked_frequency_array[chunk_lo:chunk_hi]
-            if raw_strain is None:
-                chunk_strain = self.injection.signal(interferometer, chunk_frequencies)
-            else:
-                chunk_strain = raw_strain[raw_offset + chunk_lo:raw_offset + chunk_hi]
-            chunk_psd = (
-                psd_model.get_power_spectral_density_array(chunk_frequencies)
-                * window_power_correction)
-            delta_frequency = chunk_frequencies - central_frequency
-
-            chunk_h0 = {
-                key: self._project_fiducial_mode(
-                    interferometer, self._fiducial_converted_parameters, key, chunk_frequencies)
-                for key in mode_keys}
-            chunk_h_test = {
-                key: self._project_fiducial_mode(
-                    interferometer, test_converted_parameters, key, chunk_frequencies)
-                for key in mode_keys}
-
-            h_test_total = sum(chunk_h_test.values())
-            exact_dh += noise_weighted_inner_product(h_test_total, chunk_strain, chunk_psd, duration)
-            exact_hh += noise_weighted_inner_product(h_test_total, h_test_total, chunk_psd, duration)
-
-            for key in mode_keys:
-                h0 = chunk_h0[key]
-                a0[key] += noise_weighted_inner_product(h0, chunk_strain, chunk_psd, duration)
-                a1[key] += noise_weighted_inner_product(
-                    h0, chunk_strain * delta_frequency, chunk_psd, duration)
-                for keyp in mode_keys:
-                    h0p = chunk_h0[keyp]
-                    b0[key][keyp] += noise_weighted_inner_product(h0p, h0, chunk_psd, duration)
-                    b1[key][keyp] += noise_weighted_inner_product(
-                        h0p, h0 * delta_frequency, chunk_psd, duration)
-
-        edge_frequencies = np.array([f_lo, f_hi])
-        r0, r1 = {}, {}
-        for key in mode_keys:
-            h0_edges = self._project_fiducial_mode(
-                interferometer, self._fiducial_converted_parameters, key, edge_frequencies)
-            h_test_edges = self._project_fiducial_mode(
-                interferometer, test_converted_parameters, key, edge_frequencies)
-            ratio_edges = h_test_edges / h0_edges
-            r0[key] = 0.5 * (ratio_edges[0] + ratio_edges[1])
-            r1[key] = (ratio_edges[1] - ratio_edges[0]) / (f_hi - f_lo)
-
-        approx_dh = sum(
-            a0[key] * np.conj(r0[key]) + a1[key] * np.conj(r1[key])
-            for key in mode_keys)
-        approx_hh = sum(
-            b0[key][keyp] * r0[key] * np.conj(r0[keyp])
-            + b1[key][keyp] * (r0[key] * np.conj(r1[keyp]) + np.conj(r0[keyp]) * r1[key])
-            for key in mode_keys for keyp in mode_keys)
-
-        exact_ll = np.real(exact_dh) - 0.5 * np.real(exact_hh)
-        approx_ll = np.real(approx_dh) - 0.5 * np.real(approx_hh)
-        return exact_ll, approx_ll
 
     def set_fiducial_waveforms(self, parameters):
         """Set fiducial waveforms based on the given parameters.
