@@ -278,6 +278,12 @@ class BatchedRelativeBinningLikelihood(Likelihood):
             bin_widths=np.asarray(likelihood.bin_widths, dtype=float),
             frequencies=self.frequencies,
         )
+        for ifo in ifos:
+            if (ifo.time_to_merger_model is not None or ifo.static_response_time
+                    or ifo.fsr_phase_reference is not None):
+                raise NotImplementedError(
+                    f"{ifo.name}: the batched likelihood has only the default response "
+                    "(time_to_merger_model, static_response_time, fsr_phase_reference)")
         self._geometries = [dict(
             xx=np.asarray(ifo.geometry.xx), yy=np.asarray(ifo.geometry.yy),
             detector_tensor=np.asarray(ifo.geometry.detector_tensor),

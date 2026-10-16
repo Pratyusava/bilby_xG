@@ -30,7 +30,7 @@ from bilby.gw.detector.interferometer import Interferometer as _Interferometer
 from .geometry import InterferometerGeometry
 from .motion import geocentre_delay as _geocentre_delay, resolve_center, sky_direction
 from .propagation import Propagation, build_propagation
-from .utils import calculate_time_to_merger_for_any_mode
+from .utils import calculate_time_to_merger_for_any_mode, time_to_merger_mr1370
 
 __author__ = ["Pratyusava Baral <pbaral@uwm.edu>", "Soichiro Morisaki"]
 
@@ -106,7 +106,26 @@ class Interferometer(_Interferometer):
     :class:`bilby.gw.detector.interferometer.Interferometer`. The geometry is
     a :class:`bilby_xG.geometry.InterferometerGeometry`, which additionally
     exposes the per-arm detector tensors used by the finite-size response.
+
+    Three attributes reproduce the response of bilby merge request 1370
+    (Baker et al. 2025; Guttman et al. 2026, arXiv:2606.14197) instead;
+    the class defaults are this module's own response:
+
+    * ``time_to_merger_model``: ``None``, the waveform's own
+      ``"time_to_merger"`` if it gives one, else the 2PN estimate; or
+      ``"mr1370"``, always :func:`bilby_xG.utils.time_to_merger_mr1370`.
+    * ``static_response_time``: frequencies emitted less than this many
+      seconds before merger get the beam patterns (and finite-size factors)
+      of the Earth's orientation at merger; the arrival time still follows
+      the rotating vertex. MR 1370 uses 2 s.
+    * ``fsr_phase_reference``: ``None``, or ``"mr1370"``, whose single-arm
+      finite-size factor is this one times ``exp(-2 pi i f L / c)`` (the
+      arrival time referred to the far end of the arm, ``L / c`` later).
     """
+
+    time_to_merger_model = None
+    static_response_time = 0.
+    fsr_phase_reference = None
 
     def __init__(self, name, power_spectral_density, minimum_frequency,
                  maximum_frequency, length, latitude, longitude, elevation,
@@ -256,7 +275,7 @@ class Interferometer(_Interferometer):
             times_to_coalescence, propagation=None,
             earth_rotation_time_delay=True, earth_rotation_beam_patterns=True,
             finite_size=True, wave_frame=None, orbital_motion=True,
-            center=None, geocentre_delay=None, split=False):
+            center=None, geocentre_delay=None, split=False, delay_directions=None):
         """Frequency-dependent plus/cross antenna response.
 
         See Nishizawa et al. (2009) arXiv:0903.0528 for the polarisation
@@ -298,6 +317,11 @@ class Interferometer(_Interferometer):
             arguments, if already computed; computed here otherwise.
         split: bool
             Return the arrival-time phase separately (see below).
+        delay_directions: array_like, optional
+            Source directions (shape ``(3, n)``, as ``omegas``) for the
+            arrival-time delay of the vertex, if not those of the wave frame
+            (with ``static_response_time``, where the beam patterns are
+            frozen but the delay is not).
 
         Returns
         =======
@@ -357,11 +381,17 @@ class Interferometer(_Interferometer):
             self.Dyy = self._finite_size_factor(fL_over_c, py)
             fps = fpxx * self.Dxx - fpyy * self.Dyy
             fcs = fcxx * self.Dxx - fcyy * self.Dyy
+            if self.fsr_phase_reference == "mr1370":
+                arm_end = np.exp(-2j * np.pi * fL_over_c)
+                fps = fps * arm_end
+                fcs = fcs * arm_end
 
         # arrival-time delay at the detector's position, relative to the
         # center, at the propagation (group) velocity
         if earth_rotation_time_delay:
-            vertex_distance = omegas.T @ self.geometry.vertex
+            if delay_directions is None:
+                delay_directions = omegas
+            vertex_distance = delay_directions.T @ self.geometry.vertex
         else:
             # the vertex held at its position at coalescence
             gmst = greenwich_mean_sidereal_time(time)
@@ -444,29 +474,51 @@ class Interferometer(_Interferometer):
             shared = {}
         earth_rotation = earth_rotation_time_delay or earth_rotation_beam_patterns
 
+        mr1370_times = self.time_to_merger_model == "mr1370"
+        static_time = self.static_response_time
+
         def response(mode_key, mode, polarizations, split=False):
-            times_to_coalescence = polarizations.get(TIME_TO_MERGER_KEY)
+            times_to_coalescence = (None if mr1370_times
+                                    else polarizations.get(TIME_TO_MERGER_KEY))
             # the waveform's own time-frequency map is specific to its (l, m)
             # mode, the post-Newtonian one only depends on m
             cache_key = mode if times_to_coalescence is None else mode_key
+            if mr1370_times or static_time:
+                # not shared with detectors of the default response
+                cache_key = (cache_key, self.time_to_merger_model, static_time)
             if cache_key not in shared:
-                if times_to_coalescence is None:
+                if mr1370_times:
+                    times_to_coalescence = time_to_merger_mr1370(
+                        frequencies, parameters['mass_1'], parameters['mass_2'], mode=mode)
+                elif times_to_coalescence is None:
                     times_to_coalescence = calculate_time_to_merger_for_any_mode(
                         frequencies, parameters['mass_1'], parameters['mass_2'],
                         parameters['chi_1'], parameters['chi_2'], mode=mode, safety=1)
+                frame = compute_wave_frame(
+                    parameters['ra'], parameters['dec'], parameters['geocent_time'],
+                    parameters['psi'], frequencies, times_to_coalescence,
+                    earth_rotation=earth_rotation)
+                delay_directions = None
+                if static_time and earth_rotation:
+                    # the beam patterns at merger, the delay still rotating
+                    delay_directions = frame[0]
+                    frame = compute_wave_frame(
+                        parameters['ra'], parameters['dec'], parameters['geocent_time'],
+                        parameters['psi'], frequencies,
+                        np.where(times_to_coalescence > static_time,
+                                 times_to_coalescence, 0.),
+                        earth_rotation=earth_rotation)
                 shared[cache_key] = (
                     times_to_coalescence,
                     np.exp(1j * propagation.propagation_phase(frequencies, mode=mode)),
-                    compute_wave_frame(
-                        parameters['ra'], parameters['dec'],
-                        parameters['geocent_time'], parameters['psi'],
-                        frequencies, times_to_coalescence,
-                        earth_rotation=earth_rotation),
+                    frame,
                     _geocentre_delay(
                         parameters['ra'], parameters['dec'],
                         parameters['geocent_time'], times_to_coalescence,
-                        center=center, orbital_motion=orbital_motion))
-            times_to_coalescence, correction_factor, frame, geocentre_delay = shared[cache_key]
+                        center=center, orbital_motion=orbital_motion),
+                    delay_directions)
+            (times_to_coalescence, correction_factor, frame, geocentre_delay,
+             delay_directions) = shared[cache_key]
             factors = self.frequency_dependent_antenna_response(
                 parameters['ra'], parameters['dec'], parameters['geocent_time'],
                 parameters['psi'],
@@ -482,6 +534,7 @@ class Interferometer(_Interferometer):
                 center=center,
                 geocentre_delay=geocentre_delay,
                 split=split,
+                delay_directions=delay_directions,
             )
             if split:
                 fps, fcs, delay_phase = factors

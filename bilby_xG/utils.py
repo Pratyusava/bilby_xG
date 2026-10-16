@@ -91,6 +91,42 @@ def calculate_time_to_merger_for_any_mode(frequency, mass_1, mass_2, chi_1=0,
     return tau0 + tau2 + tau3 + tau4
 
 
+def time_to_merger_mr1370(frequency, mass_1, mass_2, mode=2):
+    """Time to merger as in bilby merge request 1370 (``time_to_merger_15PN``).
+
+    The time-dependent response of bilby MR 1370 (Baker et al. 2025, PRD
+    112, 102004; Guttman et al. 2026, arXiv:2606.14197): the 1.5PN
+    point-particle time to merger, non-spinning, with that implementation's
+    reduced mass ``M eta^(-2/5)`` in place of ``eta M``, so that the 1PN
+    coefficient has ``11 eta^(-2/5) / 4`` instead of ``11 eta / 4`` (~2%
+    longer at 5 Hz for a BNS). Only for reproducing those analyses.
+
+    Parameters
+    ==========
+    frequency: float or array_like
+        Frequency (Hz).
+    mass_1, mass_2: float
+        Detector-frame component masses (solar masses).
+    mode: int
+        Azimuthal mode number ``m``; the frequency is rescaled by ``2 / |m|``.
+
+    Returns
+    =======
+    time_to_merger: float or array_like
+        Seconds.
+    """
+    msun_to_seconds = solar_mass * gravitational_constant / speed_of_light ** 3.
+    frequency = 2 * frequency / np.abs(mode)
+    total_mass = mass_1 + mass_2
+    eta = mass_1 * mass_2 / total_mass ** 2.
+    chirp_mass_in_seconds = total_mass * eta ** (3. / 5.) * msun_to_seconds
+    tau0 = 5. / 256. * chirp_mass_in_seconds \
+        * (np.pi * chirp_mass_in_seconds * frequency) ** (-8. / 3.)
+    nu = (np.pi * total_mass * msun_to_seconds * frequency) ** (2. / 3.)
+    return tau0 * (1 + 4. / 3. * (743. / 336. + 11. * eta ** (-2. / 5.) / 4.) * nu
+                   - 32. * np.pi / 5. * nu ** (3. / 2.))
+
+
 def read_frequency_domain_data_chunked(filename, frequency_array, cache_path,
                                        chunksize=5_000_000):
     """Read a frequency-domain data file written by
