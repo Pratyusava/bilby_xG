@@ -27,10 +27,10 @@ import os
 
 import numpy as np
 
-from bilby.core import utils
 from bilby.core.utils import logger
 from bilby.gw.detector import networks as _networks
 from bilby.gw.detector.psd import PowerSpectralDensity as _PowerSpectralDensity
+from bilby.gw.utils import get_vertex_position_geocentric
 
 from .interferometer import Interferometer
 from .utils import detector_file, noise_curve_file
@@ -70,7 +70,16 @@ class TriangularInterferometer(_networks.TriangularInterferometer):
     Parameters are as in
     :class:`bilby.gw.detector.networks.TriangularInterferometer`, with the
     addition of ``colocated``: if True, the three channels share the same
-    latitude and longitude rather than being placed at the triangle vertices.
+    latitude, longitude and elevation rather than being placed at the
+    triangle vertices.
+
+    Each next channel is at the end of the current channel's x arm (a
+    straight arm of ``length``, on the WGS84 ellipsoid), with both arms
+    rotated by 120 degrees about the normal to the detector plane, so that
+    every channel's arms lie along the edges of the triangle. This is the
+    construction of LAL (LIGO-T1400308) and of bilby-dev/bilby#894; bilby up
+    to at least 2.8 instead rotates the arms by 240 degrees, which leaves
+    one arm of the second and third channels off the triangle.
     """
 
     def __init__(self, name, power_spectral_density, minimum_frequency,
@@ -79,10 +88,6 @@ class TriangularInterferometer(_networks.TriangularInterferometer):
                  colocated=False):
         # Reimplements the upstream constructor so the three channels are
         # bilby_xG Interferometers with the frequency-dependent response.
-        #
-        # If ``colocated`` is True, the three channels share the same latitude
-        # and longitude (only the arm azimuths are rotated by 240 degrees),
-        # instead of being displaced along the vertices of the triangle.
         list.__init__(self)
         self.name = name
         if isinstance(power_spectral_density, _PowerSpectralDensity):
@@ -98,16 +103,76 @@ class TriangularInterferometer(_networks.TriangularInterferometer):
                 minimum_frequency[ii], maximum_frequency[ii], length, latitude,
                 longitude, elevation, xarm_azimuth, yarm_azimuth, xarm_tilt,
                 yarm_tilt))
+            (latitude, longitude, elevation, xarm_azimuth, yarm_azimuth,
+             xarm_tilt, yarm_tilt) = _next_vertex(self[-1], colocated)
 
-            xarm_azimuth += 240
-            yarm_azimuth += 240
-            if not colocated:
-                latitude += np.arctan(
-                    length * np.sin(xarm_azimuth * np.pi / 180) * 1e3
-                    / utils.radius_of_earth) * 180 / np.pi
-                longitude += np.arctan(
-                    length * np.cos(xarm_azimuth * np.pi / 180) * 1e3
-                    / utils.radius_of_earth) * 180 / np.pi
+
+def _next_vertex(ifo, colocated=False):
+    """Position and arm orientation of the channel after ``ifo`` in a
+    triangular detector: at the end of its x arm (or at the same vertex, if
+    ``colocated``), with both arms rotated by 120 degrees about the normal
+    to the detector plane.
+
+    Returns latitude and longitude [deg], elevation [m], the x- and y-arm
+    azimuths [deg] and tilts [rad], as taken by
+    :class:`bilby_xG.interferometer.Interferometer`.
+    """
+    x_arm, y_arm = ifo.geometry.x, ifo.geometry.y
+    if colocated:
+        latitude, longitude, elevation = (
+            ifo.latitude_radians, ifo.longitude_radians, ifo.elevation)
+    else:
+        vertex = get_vertex_position_geocentric(
+            ifo.latitude_radians, ifo.longitude_radians, ifo.elevation)
+        latitude, longitude, elevation = _geocentric_to_geodetic(
+            vertex + ifo.length * 1e3 * x_arm)
+
+    normal = np.cross(x_arm, y_arm)
+    normal /= np.linalg.norm(normal)
+    angle = 2 * np.pi / 3
+
+    def rotate(arm):
+        # Rodrigues' formula, for an arm orthogonal to the normal
+        return arm * np.cos(angle) + np.cross(normal, arm) * np.sin(angle)
+
+    # the local frame in which bilby defines azimuths and tilts
+    east = np.array([-np.sin(longitude), np.cos(longitude), 0])
+    north = np.array([-np.sin(latitude) * np.cos(longitude),
+                      -np.sin(latitude) * np.sin(longitude), np.cos(latitude)])
+    up = np.array([np.cos(latitude) * np.cos(longitude),
+                   np.cos(latitude) * np.sin(longitude), np.sin(latitude)])
+    azimuths, tilts = [], []
+    for arm in (rotate(x_arm), rotate(y_arm)):
+        azimuths.append(np.degrees(np.arctan2(arm @ north, arm @ east)))
+        tilts.append(np.arcsin(arm @ up))
+    return (np.degrees(latitude), np.degrees(longitude), elevation,
+            *azimuths, *tilts)
+
+
+def _geocentric_to_geodetic(position):
+    """WGS84 latitude and longitude [rad] and elevation [m] of a geocentric
+    ``position`` [m]: the exact inverse of
+    :func:`bilby.gw.utils.get_vertex_position_geocentric`, by Borkowski's
+    method (as in bilby-dev/bilby#894)."""
+    semi_major_axis = 6378137
+    semi_minor_axis = 6356752.314
+    x_comp, y_comp, z_comp = position
+    r = np.hypot(x_comp, y_comp)
+    focal = semi_major_axis ** 2 - semi_minor_axis ** 2
+    e = (semi_minor_axis * abs(z_comp) - focal) / (semi_major_axis * r)
+    f = (semi_minor_axis * abs(z_comp) + focal) / (semi_major_axis * r)
+    p = 4 / 3 * (e * f + 1)
+    q = 2 * (e ** 2 - f ** 2)
+    d = p ** 3 + q ** 2
+    v = np.cbrt(np.sqrt(d) - q) - np.cbrt(np.sqrt(d) + q)
+    g = (np.sqrt(e ** 2 + v) + e) / 2
+    t = np.sqrt(g ** 2 + (f - v * g) / (2 * g - e)) - g
+    latitude = np.sign(z_comp) * np.arctan(
+        semi_major_axis * (1 - t ** 2) / (2 * semi_minor_axis * t))
+    longitude = np.arctan2(y_comp, x_comp)
+    elevation = ((r - semi_major_axis * t) * np.cos(latitude)
+                 + (z_comp - semi_minor_axis * np.sign(z_comp)) * np.sin(latitude))
+    return latitude, longitude, elevation
 
 
 def load_interferometer(filename, **overrides):

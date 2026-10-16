@@ -50,7 +50,8 @@ def mlgw_bns_jax_modes(model, mode_array):
     """A JAX function evaluating selected mlgw_bns modes for a batch.
 
     Returns ``modes(theta, total_mass, distance, inclination, phase,
-    frequencies) -> (plus, cross)``, each of shape ``(n, n_modes, n_freqs)``,
+    frequencies) -> (plus, cross, time_to_merger)``, each of shape
+    ``(n, n_modes, n_freqs)``,
     with ``theta`` of shape ``(n, 5)``, rows ``[q >= 1, lambda_1, lambda_2,
     chi_1, chi_2]``, and the other parameters of shape ``(n,)``: the same
     per-mode polarisations as :func:`bilby_xG.source.mlgw_bns_individual_modes`
@@ -60,13 +61,14 @@ def mlgw_bns_jax_modes(model, mode_array):
     import jax.numpy as jnp
     from mlgw_bns.batched import mode_polarizations
 
-    predict = model.jax_modes_amp_phase(mode_array)
+    predict = model.jax_modes_amp_phase(mode_array, return_tf=True)
 
     def modes(theta, total_mass, distance, inclination, phase, frequencies):
-        amp, phi = predict(theta, total_mass, frequencies, distance)
+        amp, phi, times = predict(theta, total_mass, frequencies, distance)
         # pi/2 - phase: the azimuth convention of the TEOBResumS SPA models
-        return mode_polarizations(amp, phi, mode_array, inclination,
-                                  jnp.pi / 2 - phase, xp=jnp)
+        plus, cross = mode_polarizations(amp, phi, mode_array, inclination,
+                                         jnp.pi / 2 - phase, xp=jnp)
+        return plus, cross, -times
 
     return modes
 
@@ -312,20 +314,34 @@ class BatchedRelativeBinningLikelihood(Likelihood):
         import jax.numpy as jnp
 
         if self.precessing:
-            modes = self._modes(p)
+            # no waveform t(f) from the precessing surrogate: the PN one, per m
+            modes, time_to_merger = self._modes(p), None
         else:
             theta = jnp.stack([p["q"], p["lambda_1"], p["lambda_2"], p["chi_1"], p["chi_2"]],
                               axis=1)
-            modes = self._modes(theta, p["total_mass"], p["distance"], p["inclination"],
-                                p["phase"], arrays["frequencies"])
-        ln_l = jax.vmap(self._project, in_axes=(0, 0, None))(p, modes, arrays)
+            plus, cross, time_to_merger = self._modes(
+                theta, p["total_mass"], p["distance"], p["inclination"], p["phase"],
+                arrays["frequencies"])
+            modes = (plus, cross)
+        ln_l = jax.vmap(self._project, in_axes=(0, 0, 0, None))(
+            p, modes, time_to_merger, arrays)
         # outside the surrogate's range: outside the support
         return jnp.where(jnp.isnan(ln_l), -jnp.inf, ln_l)
 
-    def _project(self, p, modes, arrays):
+    def _project(self, p, modes, time_to_merger, arrays):
         """ln L ratio for one parameter set, given its modes ``(plus, cross)``
         (with ``precessing_scheme="split"``, ``(coprecessing, c_plus,
-        c_cross)``), each ``(n_modes, n_freqs)``."""
+        c_cross)``), each ``(n_modes, n_freqs)``, and their times to merger
+        (``None``: the post-Newtonian ones)."""
+        import jax.numpy as jnp
+
+        d_inner_h, h_inner_h = self._bin_inner_products(
+            p, modes, time_to_merger, arrays)
+        return jnp.sum(d_inner_h) - jnp.sum(h_inner_h) / 2
+
+    def _bin_inner_products(self, p, modes, time_to_merger, arrays):
+        """Re (d|h) and (h|h) of one parameter set in every bin, each
+        ``(n_bins,)``, summed over detectors and modes."""
         import jax.numpy as jnp
 
         from .likelihood import split_scheme_coefficients
@@ -339,12 +355,15 @@ class BatchedRelativeBinningLikelihood(Likelihood):
         for geometry in self._geometries:
             strains = []
             for k, (_, emm) in enumerate(self.mode_array):
-                if emm not in frames:
-                    ttc = calculate_time_to_merger_for_any_mode(
+                # the waveform's own t(f) is per mode, the PN one per m
+                key = emm if time_to_merger is None else k
+                if key not in frames:
+                    ttc = (calculate_time_to_merger_for_any_mode(
                         f, p["mass_1"], p["mass_2"], p["chi_1"], p["chi_2"], mode=emm, safety=1)
+                        if time_to_merger is None else time_to_merger[k])
                     gmsts = (p["gmst"] - p["gmst_rate"] * ttc if earth_rotation
                              else jnp.full_like(f, p["gmst"]))
-                    frames[emm] = (_wave_frame(p["ra"], p["dec"], p["psi"], gmsts),
+                    frames[key] = (_wave_frame(p["ra"], p["dec"], p["psi"], gmsts),
                                    _geocentre_delay(
                                        p["ra"], p["dec"], p["geocent_time"], p["gmst"], ttc,
                                        dict(arrays["orbit"], step=self._orbit_step),
@@ -352,8 +371,8 @@ class BatchedRelativeBinningLikelihood(Likelihood):
                 direction = jnp.stack([
                     jnp.cos(p["dec"]) * jnp.cos(p["ra"] - p["gmst"]),
                     jnp.cos(p["dec"]) * jnp.sin(p["ra"] - p["gmst"]), jnp.sin(p["dec"])])
-                response = _antenna_response(geometry, frames[emm][0], f, ifo_time, self._flags,
-                                             frames[emm][1], direction, split=self.split)
+                response = _antenna_response(geometry, frames[key][0], f, ifo_time, self._flags,
+                                             frames[key][1], direction, split=self.split)
                 if self.split:
                     coprecessing, c_plus, c_cross = modes
                     fps, fcs, delay_phase = response
@@ -372,12 +391,13 @@ class BatchedRelativeBinningLikelihood(Likelihood):
             ratio = jnp.stack(ratios) / arrays["reference"]  # (ifo, mode, edge)
             r0 = 0.5 * (ratio[..., 1:] + ratio[..., :-1])
             r1 = (ratio[..., 1:] - ratio[..., :-1]) / arrays["bin_widths"]
-        d_inner_h = jnp.sum(arrays["a0"] * jnp.conj(r0) + arrays["a1"] * jnp.conj(r1))
+        d_inner_h = jnp.sum(arrays["a0"] * jnp.conj(r0) + arrays["a1"] * jnp.conj(r1),
+                            axis=(0, 1))
         h_inner_h = jnp.sum(
             arrays["b0"] * r0[:, :, None] * jnp.conj(r0[:, None, :])
             + arrays["b1"] * (r0[:, :, None] * jnp.conj(r1[:, None, :])
-                              + jnp.conj(r0[:, None, :]) * r1[:, :, None]))
-        return jnp.real(d_inner_h) - jnp.real(h_inner_h) / 2
+                              + jnp.conj(r0[:, None, :]) * r1[:, :, None]), axis=(0, 1, 2))
+        return jnp.real(d_inner_h), jnp.real(h_inner_h)
 
     def _inputs(self, parameters):
         """Converted parameter arrays for the JAX function."""
@@ -434,6 +454,61 @@ class BatchedRelativeBinningLikelihood(Likelihood):
 
     def log_likelihood(self, parameters=None):
         return self.log_likelihood_ratio(parameters) + self.noise_log_likelihood()
+
+
+class BatchedTruncatedMixtureLikelihood(BatchedRelativeBinningLikelihood):
+    r"""Mixture of the likelihoods of the data truncated at several
+    frequencies, evaluated as :class:`BatchedRelativeBinningLikelihood`.
+
+    With :math:`\ln L_i` the log-likelihood ratio of the data in the bins
+    below the bin edge ``edges[i]`` (an index into ``bin_freqs``), and
+    :math:`\ln Z_i` = ``log_evidences[i]``, this is
+
+    .. math:: \ln L = \ln \sum_i L_i / Z_i,
+
+    whose posterior is the mixture of the truncated-data posteriors, with
+    weights proportional to the ratios of their true evidences to the
+    :math:`Z_i` given (equal if those are exact). A nested-sampling run on it
+    is then an importance sample for every truncated-data posterior: with the
+    run's prior-volume elements :math:`\Delta X_j`, the weights
+    :math:`L_i(\theta_j) \Delta X_j` have
+    :math:`L_i / Z_i \leq L`, so each posterior gets about a fraction
+    :math:`Z_i^\mathrm{true} / (Z_i \sum_k Z_k^\mathrm{true} / Z_k)` of the
+    run's effective samples (early-warning localisation from one run).
+
+    Parameters
+    ----------
+    likelihood, batch_size
+        As :class:`BatchedRelativeBinningLikelihood`.
+    edges : sequence of int
+        Increasing bin-edge indices, from 1 to ``number_of_bins`` (the whole
+        band).
+    log_evidences : sequence of float
+        :math:`\ln Z_i`, one per edge: estimates of the truncated-data log
+        Bayes factors against noise.
+    """
+
+    def __init__(self, likelihood, edges, log_evidences, batch_size=256):
+        super().__init__(likelihood, batch_size=batch_size)
+        edges = np.asarray(edges, dtype=int)
+        log_evidences = np.asarray(log_evidences, dtype=float)
+        if edges.ndim != 1 or edges.shape != log_evidences.shape or edges.size == 0:
+            raise ValueError("edges and log_evidences must be 1-d, of the same length")
+        if np.any(np.diff(edges) <= 0) or edges[0] < 1 or edges[-1] > likelihood.number_of_bins:
+            raise ValueError(f"edges must increase, from 1 to {likelihood.number_of_bins}")
+        if not np.all(np.isfinite(log_evidences)):
+            raise ValueError("log_evidences must be finite")
+        self.edges = edges
+        self.log_evidences = log_evidences
+
+    def _project(self, p, modes, time_to_merger, arrays):
+        import jax.numpy as jnp
+        from jax.scipy.special import logsumexp
+
+        d_inner_h, h_inner_h = self._bin_inner_products(
+            p, modes, time_to_merger, arrays)
+        cumulative = jnp.concatenate([jnp.zeros(1), jnp.cumsum(d_inner_h - h_inner_h / 2)])
+        return logsumexp(cumulative[self.edges] - self.log_evidences)
 
 
 def _batched_bilby_model_classes():

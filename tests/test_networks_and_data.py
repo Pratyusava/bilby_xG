@@ -1,5 +1,6 @@
 """Tests for the network/detector layer and shipped-data discovery."""
 import numpy as np
+import pytest
 
 import bilby
 from bilby_cython.geometry import time_delay_from_geocenter as _cython_tdfg
@@ -9,6 +10,7 @@ from bilby_xG.interferometer import Interferometer
 from bilby_xG.networks import (
     InterferometerList,
     PowerSpectralDensity,
+    TriangularInterferometer,
     get_empty_interferometer,
 )
 
@@ -109,6 +111,36 @@ def test_einstein_telescope_triangle_resolves_by_name():
     assert all(ifo.length == 10 for ifo in et)
     assert all(ifo.minimum_frequency == 3 for ifo in et)
     assert all("HFLF" in ifo.power_spectral_density.psd_file for ifo in et)
+
+
+@pytest.mark.parametrize("latitude, longitude, xarm_azimuth", [
+    (50 + 43 / 60 + 23 / 3600, 5 + 55 / 60 + 14 / 3600, 250.5674),
+    (-31.5, 115.9, 10.0),
+])
+def test_triangle_arms_lie_along_the_edges(latitude, longitude, xarm_azimuth):
+    # an equilateral triangle of straight 10 km arms, in which each channel's
+    # x arm ends at the next vertex and its y arm at the previous one
+    et = TriangularInterferometer(
+        "T", PowerSpectralDensity(psd_file="ET_10_HFLF_psd.txt"), 3, 4096, 10,
+        latitude, longitude, 100.0, xarm_azimuth, xarm_azimuth + 60)
+    vertices = [ifo.vertex for ifo in et]
+    for i, ifo in enumerate(et):
+        for arm, vertex in [(ifo.geometry.x, vertices[(i + 1) % 3]),
+                            (ifo.geometry.y, vertices[(i - 1) % 3])]:
+            edge = vertex - vertices[i]
+            np.testing.assert_allclose(np.linalg.norm(edge), 10e3, rtol=1e-9)
+            np.testing.assert_allclose(arm @ edge / 10e3, 1, atol=1e-12)
+
+
+@pytest.mark.parametrize("latitude", [-89.0, -43.6, 0.0, 0.3, 50.7, 89.0])
+def test_geocentric_to_geodetic_inverts_bilby(latitude):
+    from bilby.gw.utils import get_vertex_position_geocentric
+    from bilby_xG.networks import _geocentric_to_geodetic
+
+    position = (np.radians(latitude), np.radians(-120.4), 1234.5)
+    np.testing.assert_allclose(
+        _geocentric_to_geodetic(get_vertex_position_geocentric(*position)),
+        position, atol=1e-8)
 
 
 def test_einstein_telescope_network():

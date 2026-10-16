@@ -60,3 +60,38 @@ def test_nextgen_likelihood_with_higher_modes_runs():
     like.parameters.update(PARAMS)
     logl = like.log_likelihood_ratio()
     assert np.isfinite(logl)
+
+
+def test_lal_time_to_merger():
+    """With ``time_to_merger=True``, each azimuthal mode m carries the (2,2)
+    time-frequency map at 2f/m: the phase derivative of the (2,2) mode,
+    close to the 2PN estimate early in the inspiral; zero above the end of
+    the waveform, even when LAL raises there."""
+    from bilby_xG.source import binary_black_hole_individual_modes_frequency_sequence
+    from bilby_xG.utils import calculate_time_to_merger_for_any_mode
+
+    mass_1, mass_2, chi_1 = 10.0, 1.5, 0.3
+    frequencies = np.linspace(20.0, 20.01, 1001)
+
+    def modes(frequencies, approximant, **kwargs):
+        return binary_black_hole_individual_modes_frequency_sequence(
+            frequencies, mass_1, mass_2, 100.0, chi_1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.4, 1.3,
+            frequencies=frequencies, waveform_approximant=approximant,
+            mode_array=[[2, 2], [2, -2], [2, 1], [2, -1], [3, 3], [3, -3], [4, 4], [4, -4]],
+            reference_frequency=20.0, **kwargs)
+
+    out = modes(frequencies, "IMRPhenomXHM", time_to_merger=True)
+    phase = np.unwrap(np.angle(out["2"]["plus"]))
+    np.testing.assert_allclose(out["2"]["time_to_merger"][1:-1],
+                               np.gradient(phase, frequencies)[1:-1] / (2 * np.pi), rtol=1e-6)
+    for key, value in out.items():
+        post_newtonian = calculate_time_to_merger_for_any_mode(
+            frequencies, mass_1, mass_2, chi_1, 0.0, mode=int(key), safety=1)
+        # 2PN is off by ~1.5% for m = 1, i.e. the (2,2) mode at 40 Hz
+        np.testing.assert_allclose(value["time_to_merger"], post_newtonian, rtol=3e-2)
+    assert "time_to_merger" not in modes(frequencies, "IMRPhenomXHM")["2"]
+
+    # the (2,1) map needs the (2,2) mode at 2f, beyond the end of the waveform
+    late = np.linspace(3000.0, 3100.0, 11)
+    out = modes(late, "IMRPhenomXPHM", time_to_merger=True)
+    assert np.all(out["1"]["time_to_merger"] == 0)

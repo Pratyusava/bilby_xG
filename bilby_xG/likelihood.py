@@ -43,6 +43,7 @@ from bilby.gw.likelihood import (
 )
 from bilby.gw.utils import noise_weighted_inner_product
 
+from .interferometer import TIME_TO_MERGER_KEY
 from .injection import complex_gaussian
 from .motion import resolve_center
 
@@ -60,6 +61,16 @@ def _resolve_parameters(likelihood, parameters):
     if parameters is None:
         return likelihood.parameters
     return parameters
+
+
+def _select_frequencies(polarizations, index):
+    """The polarisation dict (``{"plus", "cross", ...}`` or per mode
+    ``{mode_key: {"plus", "cross", ...}}``) at the frequencies ``index``,
+    keeping every per-frequency entry, such as the waveform's own
+    ``"time_to_merger"``."""
+    return {key: (_select_frequencies(value, index) if isinstance(value, dict)
+                  else value[index])
+            for key, value in polarizations.items()}
 
 
 def _log_likelihood_ratio_at(likelihood, parameters):
@@ -241,20 +252,8 @@ class GravitationalWaveTransientNextGeneration(GravitationalWaveTransient):
         idxs_above_minimum_frequency = frequencies > \
             (interferometer.minimum_frequency - (frequencies[1] - frequencies[0]))
         freqs = frequencies[idxs_above_minimum_frequency]
-        waveform_polarizations_red = {}
-
-        try:
-            waveform_polarizations_red['plus'] = \
-                signal_polarizations['plus'][idxs_above_minimum_frequency]
-            waveform_polarizations_red['cross'] = \
-                signal_polarizations['cross'][idxs_above_minimum_frequency]
-        except KeyError:
-            for key in signal_polarizations.keys():
-                waveform_polarizations_red[key] = {}
-                waveform_polarizations_red[key]['plus'] = \
-                    signal_polarizations[key]['plus'][idxs_above_minimum_frequency]
-                waveform_polarizations_red[key]['cross'] = \
-                    signal_polarizations[key]['cross'][idxs_above_minimum_frequency]
+        waveform_polarizations_red = _select_frequencies(
+            signal_polarizations, idxs_above_minimum_frequency)
         h = np.zeros_like(frequencies, dtype=complex)
         parameters = _resolve_parameters(self, parameters)
         parameters, _ = self.waveform_generator.parameter_conversion(parameters)
@@ -357,19 +356,8 @@ class MBGravitationalWaveTransientNextGeneration(MBGravitationalWaveTransient):
         """
         parameters = _resolve_parameters(self, parameters)
         converted_parameters, _ = self.waveform_generator.parameter_conversion(parameters)
-        waveform_polarizations_red = {}
-        try:
-            waveform_polarizations_red['plus'] = \
-                waveform_polarizations['plus'][self.unique_to_original_frequencies]
-            waveform_polarizations_red['cross'] = \
-                waveform_polarizations['cross'][self.unique_to_original_frequencies]
-        except KeyError:
-            for key in waveform_polarizations.keys():
-                waveform_polarizations_red[key] = {}
-                waveform_polarizations_red[key]['plus'] = \
-                    waveform_polarizations[key]['plus'][self.unique_to_original_frequencies]
-                waveform_polarizations_red[key]['cross'] = \
-                    waveform_polarizations[key]['cross'][self.unique_to_original_frequencies]
+        waveform_polarizations_red = _select_frequencies(
+            waveform_polarizations, self.unique_to_original_frequencies)
         h = interferometer.get_detector_response_for_frequency_dependent_antenna_response(
             waveform_polarizations=waveform_polarizations_red,
             parameters=converted_parameters,
@@ -587,9 +575,8 @@ class RelativeBinningGravitationalWaveTransientNextGeneration(RelativeBinningGra
                 (interferometer.minimum_frequency - (frequencies[1] - frequencies[0]))
             freqs = frequencies[idxs_above_minimum_frequency]
 
-            waveform_polarizations_reduced = {}
-            waveform_polarizations_reduced['plus'] = self.fiducial_polarizations['plus'][idxs_above_minimum_frequency]
-            waveform_polarizations_reduced['cross'] = self.fiducial_polarizations['cross'][idxs_above_minimum_frequency]
+            waveform_polarizations_reduced = _select_frequencies(
+                self.fiducial_polarizations, idxs_above_minimum_frequency)
 
             wf = np.zeros_like(interferometer.frequency_array, dtype=complex)
             wf[idxs_above_minimum_frequency] = \
@@ -1411,8 +1398,10 @@ class RelativeBinningGravitationalWaveTransientNextGenerationModebyMode(Gravitat
             keys = ('coprecessing', 'c_plus', 'c_cross')
         else:
             keys = ('plus', 'cross')
+        # the waveform's own time to merger, when it gives one, rides along
         waveform_polarizations_reduced = {
-            mode_key: {key: mode_polarizations[key] for key in keys}}
+            mode_key: {key: mode_polarizations[key] for key in keys + (TIME_TO_MERGER_KEY,)
+                       if key in mode_polarizations}}
 
         wf = np.zeros(len(frequencies), dtype=complex)
         response = interferometer.get_detector_response_for_frequency_dependent_antenna_response(
